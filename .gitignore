@@ -1,0 +1,7 @@
+.build/
+dist/
+.dd_research/
+*.zip
+*.tar.gz
+__pycache__/
+*.pyc
