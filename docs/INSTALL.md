@@ -7,8 +7,10 @@
    o rootfs FEX (`~/.droiddeck-x64/rootfs/usr/bin/env`).
 2. Se o cliente x86-64 ainda não existe, chama `droiddeck-steam-x64 --prepare`
    (baixa FEX, rootfs e cliente; pode demorar).
-3. Instala dependências de build via `pacman` quando faltam (`base-devel`,
-   `lua54`, `curl`, `openssl`, `unzip`, `python`, `file`).
+3. Instala dependências de build quando faltam, via `apt-get` (LinuxFS Ubuntu
+   atual: `build-essential`, `pkg-config`, `liblua5.4-dev`,
+   `libcurl4-openssl-dev`, `unzip`, `python3`, `file`, `xz-utils`, `zstd`) ou
+   `pacman` (imagens Arch antigas).
 4. Baixa e instala o `slsteam-x86_64.zip` do release; se indisponível e
    `--build` foi passado, compila dentro do rootfs FEX com `apt` + `make`.
 5. Baixa o source do Lumen, compila para aarch64 e instala em

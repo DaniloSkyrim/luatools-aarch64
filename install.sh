@@ -3,7 +3,8 @@
 #  luatools-aarch64 — LuaTools + SLSsteam + Lumen for DroidDeck (ARM64 host)
 # ============================================================================
 #  Target runtime:
-#    * host:        aarch64 Linux inside the DroidDeck desktop (Arch Linux ARM)
+#    * host:        aarch64 Linux inside the DroidDeck desktop (Ubuntu 26.04
+#                   on current images; Arch Linux ARM on older ones)
 #    * Steam:       DroidDeck's x86-64 client (steamrt64/steam) under FEX
 #
 #  What this installs:
@@ -145,19 +146,32 @@ ensure_deps() {
 		ok "build tools present"
 		return 0
 	fi
-	if ! have pacman; then
-		die "missing ${missing[*]} and pacman is unavailable; install them and re-run"
-	fi
-	step "installing build dependencies with pacman: ${missing[*]}"
+
 	local SUDO=""
 	if [ "$(id -u)" -ne 0 ]; then
 		have sudo || die "missing ${missing[*]} and neither root nor sudo is available"
 		SUDO="sudo"
 	fi
-	# lua54/curl/openssl are Lumen build deps; base-devel supplies gcc, make, pkgconf.
-	$SUDO pacman -S --needed --noconfirm base-devel lua54 curl openssl unzip python tar xz file 2>/dev/null || \
-		die "pacman could not install the build dependencies"
-	have gcc && have make && have pkg-config || die "build tools still missing after pacman"
+
+	# DroidDeck's current LinuxFS is Ubuntu (apt); older/other images are Arch
+	# Linux ARM (pacman). Lumen needs a C compiler plus the lua5.4 and libcurl
+	# development files.
+	if have apt-get; then
+		step "installing build dependencies with apt-get: ${missing[*]}"
+		$SUDO apt-get update -qq || warn "apt-get update failed; trying the install anyway"
+		DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y --no-install-recommends \
+			build-essential pkg-config liblua5.4-dev libcurl4-openssl-dev \
+			ca-certificates curl unzip python3 file tar xz-utils zstd >/dev/null || \
+			die "apt-get could not install the build dependencies"
+	elif have pacman; then
+		step "installing build dependencies with pacman: ${missing[*]}"
+		# lua54/curl/openssl are Lumen build deps; base-devel supplies gcc, make, pkgconf.
+		$SUDO pacman -S --needed --noconfirm base-devel lua54 curl openssl unzip python tar xz file >/dev/null || \
+			die "pacman could not install the build dependencies"
+	else
+		die "missing ${missing[*]} and neither apt-get nor pacman is available; install them and re-run"
+	fi
+	have gcc && have make && have pkg-config || die "build tools still missing after the package manager"
 	ok "build dependencies installed"
 }
 
@@ -449,9 +463,11 @@ install_sevenzip() {
 		fi
 	fi
 	warn "could not fetch the official aarch64 7zz; falling back to p7zip"
-	if have pacman; then
-		local SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
-		$SUDO pacman -S --needed --noconfirm p7zip 2>/dev/null || true
+	local SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
+	if have apt-get; then
+		$SUDO apt-get install -y --no-install-recommends p7zip-full >/dev/null 2>&1 || true
+	elif have pacman; then
+		$SUDO pacman -S --needed --noconfirm p7zip >/dev/null 2>&1 || true
 	fi
 	if [ -x /usr/bin/7z ]; then
 		printf '#!/bin/sh\nexec /usr/bin/7z "$@"\n' > "$dest"

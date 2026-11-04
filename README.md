@@ -16,8 +16,9 @@ LuaTools é arch-neutral.
 1. DroidDeck com o **cliente Steam x86-64 ativado**.
 2. A Steam x86-64 aberta pelo menos uma vez (o DroidDeck baixa `steamrt64`,
    o FEX e o rootfs Ubuntu 24.04 nessa primeira execução).
-3. O instalador roda dentro do desktop Linux do DroidDeck (host aarch64, Arch
-   Linux ARM).
+3. O instalador roda dentro do desktop Linux do DroidDeck (host aarch64; as
+   imagens atuais são **Ubuntu 26.04**, as antigas eram Arch Linux ARM — ele usa
+   `apt-get` ou `pacman`, o que existir).
 
 ## Estado verificado (2026-11-04)
 
