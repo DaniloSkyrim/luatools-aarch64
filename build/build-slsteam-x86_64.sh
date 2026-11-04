@@ -13,9 +13,13 @@ set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 out=${1:-$here/../dist}
+# Resolve before cd: a relative output path would otherwise land inside the
+# cloned source tree (the script cd's into it below).
+out=$(realpath -m "$out")
 work=${WORK:-$here/../.build}
 ref=${SLS_REF:-dev-X86_64}
 
+mkdir -p "$out"
 rm -rf "$work"
 mkdir -p "$work"
 
