@@ -274,6 +274,17 @@ install_slsteam_shims() {
 	mkdir -p "$SLS_DIR/path"
 	cat > "$SLS_DIR/path/steam" <<'EOF'
 #!/bin/sh
+# Lumen runs with HOME=$X64_HOME (see x64_env), but droiddeck-steam-x64 derives
+# its own X64_HOME from HOME. Restore the outer home before calling it, or the
+# relaunch would create a nested ~/.droiddeck-x64 and bootstrap a second client.
+x64="${BL_X64_HOME:-}"
+if [ -z "$x64" ]; then
+	d=$(cd "$(dirname "$0")" && pwd)
+	x64=$(dirname "$(dirname "$(dirname "$(dirname "$d")")")")
+fi
+if [ "$HOME" = "$x64" ]; then
+	HOME=$(dirname "$x64"); export HOME
+fi
 exec /usr/local/bin/droiddeck-steam-x64 --exec "$@"
 EOF
 	chmod 0755 "$SLS_DIR/path/steam"
@@ -312,8 +323,12 @@ install_lumen() {
 	install -m 0755 "$src/bin/lumen" "$LUMEN_DIR/lumen"
 	rm -rf "$LUMEN_DIR/lua"
 	cp -r "$src/lua" "$LUMEN_DIR/lua"
-	patch_lumen_proc "$LUMEN_DIR/lua/proc.lua"
-	patch_lumen_about "$LUMEN_DIR/lua/about.lua"
+	patch_lumen_proc "$LUMEN_DIR/lua/proc.lua" || \
+		warn "Lumen will not recognise the FEX Steam process; the LuaTools UI may detach"
+	patch_lumen_restart "$LUMEN_DIR/lua/restart_steam.sh" || \
+		warn "Lumen's Restart Steam cannot see the FEX client; restart it from the desktop"
+	patch_lumen_about "$LUMEN_DIR/lua/about.lua" || \
+		warn "Lumen's Update All still points at the i386 moon stack; do not use it"
 	ok "Lumen installed in $LUMEN_DIR"
 }
 
@@ -324,7 +339,7 @@ patch_lumen_about() {
 	local f="$1"
 	[ -f "$f" ] || { warn "Lumen about.lua not found; skipping update URL patch"; return 0; }
 	grep -q 'SLSSTEAM-AARCH64-UPDATE-URL' "$f" && return 0
-	python3 - "$f" "$REPO_SLUG" <<'PY' || warn "could not patch Lumen about.lua"
+	python3 - "$f" "$REPO_SLUG" <<'PY' || { warn "could not patch Lumen about.lua"; return 1; }
 import sys
 path, repo = sys.argv[1], sys.argv[2]
 src = open(path, encoding="utf-8").read()
@@ -347,21 +362,25 @@ patch_lumen_proc() {
 	local f="$1"
 	[ -f "$f" ] || { warn "Lumen proc.lua not found; skipping FEX match patch"; return 0; }
 	grep -q 'SLSSTEAM-FEX-MATCH' "$f" && return 0
-	python3 - "$f" <<'PY' || warn "could not patch Lumen proc.lua for FEX"
+	python3 - "$f" <<'PY' || { warn "could not patch Lumen proc.lua for FEX"; return 1; }
 import sys
 path = sys.argv[1]
 src = open(path, encoding="utf-8").read()
-helper = '''-- SLSSTEAM-FEX-MATCH: the x86-64 Steam client runs under FEX, so its
--- /proc/<pid>/comm is FEX/FEXInterpreter rather than "steam". Match the guest
--- command line for the Steam client instead of relying on comm alone.
+helper = '''-- SLSSTEAM-FEX-MATCH: the x86-64 Steam client (and its helpers) run under
+-- FEX, so /proc/<pid>/comm is FEX/FEXInterpreter rather than "steam". Match the
+-- guest command line instead: the emulated binary is an argument ending in
+-- "/<comm>" (NUL-separated argv), which does not confuse steam with
+-- steamwebhelper.
 local function sls_match(comm, name, root, entry)
   if name == comm then return true end
-  if comm ~= "steam" or type(name) ~= "string" or not name:match("^FEX") then return false end
+  if type(name) ~= "string" or not name:match("^FEX") then return false end
   local fh = io.open(root .. "/" .. entry .. "/cmdline", "rb")
   if not fh then return false end
   local line = fh:read("*a")
   fh:close()
-  return line ~= nil and line:find("steamrt64/steam", 1, true) ~= nil
+  if not line then return false end
+  local arg = "/" .. comm
+  return line:find(arg .. "\\0", 1, true) ~= nil or line:sub(-#arg) == arg
 end
 '''
 src = src.replace("local proc = {}\n", "local proc = {}\n\n" + helper, 1)
@@ -374,10 +393,48 @@ PY
 	ok "Lumen proc.lua taught to recognise the FEX Steam process"
 }
 
+# Lumen's Restart Steam helper uses `pgrep -x steam` / `pkill -x steam`, which
+# never match a FEX guest. Without this it reports the client as already gone
+# and refuses to relaunch.
+patch_lumen_restart() {
+	local f="$1"
+	[ -f "$f" ] || { warn "Lumen restart_steam.sh not found; skipping FEX match patch"; return 0; }
+	grep -q 'SLSSTEAM-FEX-MATCH' "$f" && return 0
+	python3 - "$f" <<'PY' || { warn "could not patch Lumen restart_steam.sh for FEX"; return 1; }
+import sys
+path = sys.argv[1]
+src = open(path, encoding="utf-8").read()
+
+anchor = 'CHECK_ONLY="${1:-}"\n'
+if anchor not in src:
+    raise SystemExit("CHECK_ONLY anchor not found")
+
+src = src.replace("pgrep -x steam >/dev/null 2>&1", "sls_steam_alive")
+src = src.replace("pkill -TERM -x steam >/dev/null 2>&1 || true", "sls_signal_steam TERM")
+src = src.replace("pkill -KILL -x steam >/dev/null 2>&1 || true", "sls_signal_steam KILL")
+
+helper = '''
+# SLSSTEAM-FEX-MATCH: the x86-64 client runs under FEX, so its comm is
+# FEX/FEXInterpreter rather than "steam". Match the guest cmdline too.
+sls_steam_alive() {
+  pgrep -x steam >/dev/null 2>&1 || pgrep -f 'steamrt64/steam( |$)' >/dev/null 2>&1
+}
+sls_signal_steam() {
+  pkill -"$1" -x steam >/dev/null 2>&1 || true
+  pkill -"$1" -f 'steamrt64/steam( |$)' >/dev/null 2>&1 || true
+}
+'''
+src = src.replace(anchor, anchor + helper, 1)
+open(path, "w", encoding="utf-8").write(src)
+PY
+	ok "Lumen restart helper taught to recognise the FEX Steam process"
+}
+
 # ----------------------------------------------------------------------------
 # LuaTools plugin + 7zz
 # ----------------------------------------------------------------------------
 install_sevenzip() {
+	mkdir -p "$1/bin"
 	local dest="$1/bin/7zz"
 	local tmpd="$TMP/7z"
 	mkdir -p "$tmpd"
@@ -415,11 +472,41 @@ install_plugin() {
 	pj="$(find "$root" -maxdepth 2 -name plugin.json -type f | head -n1)"
 	[ -n "$pj" ] || die "the plugin archive has no plugin.json"
 	local srcdir; srcdir="$(dirname "$pj")"
-	rm -rf "$LUMEN_DIR/luatools"
-	mkdir -p "$LUMEN_DIR/luatools"
-	cp -r "$srcdir"/. "$LUMEN_DIR/luatools"/
-	install_sevenzip "$LUMEN_DIR/luatools/backend"
-	ok "LuaTools plugin installed in $LUMEN_DIR/luatools"
+	local dest="$LUMEN_DIR/luatools"
+	# The plugin keeps its settings and donated appid list under
+	# backend/data; a reinstall must not reset them. api.json is the legacy
+	# location of the user's API list and is migrated into data on restore.
+	local data_bak=""
+	if [ -d "$dest/backend/data" ] || [ -f "$dest/backend/api.json" ]; then
+		# Sibling of $dest so the backup survives even if $TMP is cleaned up.
+		data_bak="$LUMEN_DIR/.plugin-data.$$"
+		mkdir -p "$data_bak" || die "could not create the plugin backup directory"
+		if [ -d "$dest/backend/data" ] && \
+			! cp -a "$dest/backend/data/." "$data_bak/" 2>/dev/null; then
+			rm -rf "$data_bak"
+			die "could not back up the LuaTools settings; reinstall aborted"
+		fi
+		if [ ! -f "$data_bak/api.json" ] && [ -f "$dest/backend/api.json" ]; then
+			cp -a "$dest/backend/api.json" "$data_bak/api.json" 2>/dev/null || true
+		fi
+	fi
+
+	rm -rf "$dest"
+	mkdir -p "$dest"
+	cp -r "$srcdir"/. "$dest"/
+
+	if [ -n "$data_bak" ]; then
+		mkdir -p "$dest/backend/data"
+		if cp -a "$data_bak/." "$dest/backend/data/" 2>/dev/null; then
+			rm -rf "$data_bak"
+			ok "previous LuaTools settings restored"
+		else
+			warn "could not restore the previous LuaTools settings (kept in $data_bak)"
+		fi
+	fi
+
+	install_sevenzip "$dest/backend"
+	ok "LuaTools plugin installed in $dest"
 }
 
 # CloudRedirect is best-effort: it is only useful if the x86-64 build exists.
@@ -444,7 +531,19 @@ install_cloudredirect() {
 	fi
 	mkdir -p "$SHARE/CloudRedirect"
 	install -m 0755 "$so" "$SHARE/CloudRedirect/cloud_redirect.so"
-	install -m 0755 "$cli" "$SHARE/CloudRedirect/cloud_redirect_cli"
+	# Lumen runs on the ARM64 host, so it cannot exec the x86-64 CLI directly;
+	# wrap it in FEX using the guest rootfs Steam already uses.
+	install -m 0755 "$cli" "$SHARE/CloudRedirect/cloud_redirect_cli.bin"
+	cat > "$SHARE/CloudRedirect/cloud_redirect_cli" <<'EOF'
+#!/bin/sh
+# x86-64 CLI launched through FEX; the x86-64 home is three levels above
+# this script (.local/share/CloudRedirect), so it works from any shell.
+dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || dir=$(dirname "$0")
+x64=$(dirname "$(dirname "$(dirname "$dir")")")
+exec env FEX_ROOTFS="$x64/rootfs" "${BL_FEX:-/usr/local/bin/FEX}" \
+  "$dir/cloud_redirect_cli.bin" "$@"
+EOF
+	chmod 0755 "$SHARE/CloudRedirect/cloud_redirect_cli"
 	ok "CloudRedirect x86-64 installed in $SHARE/CloudRedirect"
 }
 
@@ -483,15 +582,19 @@ if needle not in src:
 
 block = f'''{begin}
   if [ -z "${{SLS_DISABLE:-}}" ]; then
-    SLS_SHARE="$HOME/.local/share"
+    # Never let the host (aarch64) loader see the guest's x86-64 audit lib.
+    unset LD_AUDIT
+    SLS_SHARE="${{X64_HOME:-$HOME/.droiddeck-x64}}/.local/share"
     SLS_AUDIT_LIBS="$SLS_SHARE/SLSsteam/SLSsteam.so"
     [ -s "$SLS_SHARE/SLSsteam/library-inject.so" ] && \\
       SLS_AUDIT_LIBS="$SLS_SHARE/SLSsteam/library-inject.so:$SLS_AUDIT_LIBS"
     if [ -x "$SLS_SHARE/Lumen/lumen" ] && ! pgrep -f "$SLS_SHARE/Lumen/lumen" >/dev/null 2>&1; then
-      touch "$HOME/.local/share/Steam/.cef-enable-remote-debugging" 2>/dev/null || true
+      touch "$STEAM_X64/.cef-enable-remote-debugging" 2>/dev/null || true
       env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH -u FEX_ROOTFS \\
           -u FEX_THUNKCONFIG -u FEX_THUNKHOSTLIBS -u FEX_THUNKGUESTLIBS \\
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\
+          BL_X64_HOME="$X64_HOME" \\
+          LUMEN_SINGLETON_LOCK="$SLS_SHARE/Lumen/lumen.lock" \\
           LUMEN_BACKEND_DIR="$SLS_SHARE/Lumen/luatools/backend" \\
           LUMEN_LUA_DIR="$SLS_SHARE/Lumen/lua" \\
           setsid "$SLS_SHARE/Lumen/lumen" >/dev/null 2>&1 < /dev/null &
@@ -555,6 +658,12 @@ verify() {
 			ok "lumen is aarch64" || { warn "lumen has the wrong architecture"; bad=1; }
 	fi
 	[ -f "$LUMEN_DIR/luatools/plugin.json" ] && ok "LuaTools plugin present" || { warn "LuaTools plugin missing"; bad=1; }
+	grep -q 'SLSSTEAM-FEX-MATCH' "$LUMEN_DIR/lua/proc.lua" 2>/dev/null && \
+		ok "Lumen recognises the FEX Steam process" || { warn "Lumen's FEX process match is missing"; bad=1; }
+	grep -q 'SLSSTEAM-AARCH64-UPDATE-URL' "$LUMEN_DIR/lua/about.lua" 2>/dev/null && \
+		ok "Lumen Update All points at this repository" || { warn "Lumen Update All still points upstream"; bad=1; }
+	[ -x "$LUMEN_DIR/luatools/backend/bin/7zz" ] && \
+		ok "aarch64 7zz present for the plugin backend" || warn "no 7zz binary in the plugin backend"
 	if [ -f "$SHARE/CloudRedirect/cloud_redirect.so" ]; then
 		file -b "$SHARE/CloudRedirect/cloud_redirect.so" | grep -q 'ELF 64-bit.*x86-64' && \
 			ok "CloudRedirect is x86-64" || { warn "CloudRedirect has the wrong architecture"; bad=1; }

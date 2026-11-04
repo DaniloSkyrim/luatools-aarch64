@@ -32,6 +32,40 @@ O `library-inject.so` do branch `dev-X86_64` é um arquivo vazio (o helper
 `SLSsteam.so`; se um build futuro trouxer um `library-inject.so` ELF64 real, o
 instalador o inclui automaticamente.
 
+## Lumen nativo, Steam sob FEX
+
+O bloco do launcher inicia o Lumen **antes** do `exec` do FEX, com o ambiente
+limpo de `LD_AUDIT`/`LD_PRELOAD`/`LD_LIBRARY_PATH` e com `HOME=$X64_HOME` (o
+próprio `x64_env` do DroidDeck já exporta isso). Isso é o que faz os caminhos
+`~/.local/share/...` usados pelo Lumen apontarem para a árvore x86-64:
+
+- `$HOME/.local/share/SLSsteam` (shim de restart e config);
+- `$HOME/.local/share/CloudRedirect`;
+- `$HOME/.local/share/Steam` (o cliente x86-64, não o ARM).
+
+O instalador ajusta o Lumen para o ambiente emulado:
+
+| Arquivo | Ajuste |
+|---|---|
+| `lua/proc.lua` | reconhece o cliente pelo cmdline (`/steam` em argv), já que `comm` é `FEXInterpreter`; vale também para `steamwebhelper` |
+| `lua/restart_steam.sh` | `sls_steam_alive`/`sls_signal_steam` casam o processo FEX do guest |
+| `lua/about.lua` | Update All aponta para este repositório, não para o instalador i386 |
+
+O shim `SLSsteam/path/steam` restaura o `HOME` externo antes de chamar o
+launcher (o Lumen roda com `HOME=$X64_HOME`); sem isso o restart criaria um
+`~/.droiddeck-x64` aninhado e baixaria um segundo cliente.
+
+## 7zz e CloudRedirect CLI
+
+O plugin traz `backend/bin/7zz` **x86-64**; o backend roda no Lumen aarch64, então
+o instalador o substitui pelo 7zz oficial aarch64 (ou por um shim para o
+`p7zip`). O `cloud_redirect_cli` também é x86-64: fica em
+`cloud_redirect_cli.bin` e o caminho `cloud_redirect_cli` é um wrapper que o
+executa pelo FEX com o rootfs do DroidDeck.
+
+Reinstalar o plugin **preserva** `backend/data` (configurações, APIs, lista de
+appids) e migra o antigo `backend/api.json` para dentro de `data`.
+
 ## Caminhos
 
 | Item | Caminho |

@@ -23,17 +23,22 @@ LuaTools é arch-neutral.
 
 Já verificado neste repositório:
 
+- O CI compilou e publicou os dois assets do release `slsteam-x86_64`:
+  `slsteam-x86_64.zip` (`SLSsteam.so` ELF64 x86-64, 25 MB) e
+  `cloudredirect-x86_64.zip` (`.so` + CLI, ambos ELF64 x86-64).
 - Os **17/17** padrões da branch `dev-X86_64` casam de forma única no
-  `steamrt64/steamclient.so` atual (build-id `1a5890ef…`); ver
-  `tools/check_patterns.py` e `reference/steam-x86_64-target` na memória.
+  `steamrt64/steamclient.so` atual (build-id `1a5890ef…`), verificado no CI
+  contra o cliente vivo (`ambiguous=0 missing=0`).
 - O bloco de injeção foi aplicado ao `droiddeck-steam-x64` **real** e o script
   resultante passa em `bash -n`; o patch é idempotente e reversível.
-- O instalador passa nos testes offline (`bash tests/test-install.sh`).
+- O instalador passa nos testes offline (`bash tests/test-install.sh`),
+  incluindo os patches do Lumen, a preservação de dados do plugin e o wrapper
+  do CLI do CloudRedirect.
 
-Ainda depende de execução real (não há toolchain Linux x86-64 nesta máquina):
+Ainda depende de execução real:
 
-- A primeira execução do workflow de build (compila a branch `dev-X86_64`).
-- A validação em um dispositivo DroidDeck (injeção no guest FEX e Lumen).
+- A validação em um dispositivo DroidDeck (injeção no guest FEX, Lumen/CEF e o
+  hook do CloudRedirect no cliente emulado).
 
 ## Publicação única (build do SLSsteam x86-64)
 
@@ -99,10 +104,11 @@ Para desativar a injeção numa sessão: `SLS_DISABLE=1 steam`.
 
 ## Limitações desta versão
 
-- **CloudRedirect é best-effort.** O CI tenta um build x86-64 (o hook resolve
-  a vtable por RTTI e a árvore tem branches `__x86_64__`); se o build ou o hook
-  não funcionarem, o instalador deixa a aba de cloud saves desativada e o
-  restante do LuaTools segue funcionando.
+- **CloudRedirect compila, mas o hook não foi executado num cliente emulado.**
+  O build x86-64 é publicado pelo CI (o hook resolve a vtable por RTTI e a
+  árvore tem branches `__x86_64__`); se ele falhar em runtime, o instalador não
+  quebra nada e a aba de cloud saves fica desativada, mas o restante do
+  LuaTools segue funcionando.
 - A branch `dev-X86_64` é o SLSsteam upstream, não o fork `slsteam-moon`:
   o catálogo de assinaturas, o contrato de porta CEF e alguns fixes do fork
   moon não existem nela. O plugin e o Lumen continuam instalados.
