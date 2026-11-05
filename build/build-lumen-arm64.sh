@@ -34,15 +34,17 @@ EXPECTED=${LUMEN_COMMIT:-52475c3ec0bbe2bf0ccdd209d86a40d99a9881fa}
 mkdir -p "$out"
 
 echo "== cloning swwayps/lumen@$EXPECTED"
+# -c core.autocrlf=false: a CRLF working tree breaks the lua/ patch and any
+# LF-sensitive script shipped in the asset.
 if [ -d "$work/lumen/.git" ]; then
 	git -C "$work/lumen" fetch --depth 1 origin "$EXPECTED"
-	git -C "$work/lumen" checkout -q FETCH_HEAD
+	git -c core.autocrlf=false -C "$work/lumen" checkout -q FETCH_HEAD
 else
 	mkdir -p "$work"
-	git init -q "$work/lumen"
+	git -c core.autocrlf=false init -q "$work/lumen"
 	git -C "$work/lumen" remote add origin https://github.com/swwayps/lumen.git
 	git -C "$work/lumen" fetch --depth 1 origin "$EXPECTED"
-	git -C "$work/lumen" checkout -q FETCH_HEAD
+	git -c core.autocrlf=false -C "$work/lumen" checkout -q FETCH_HEAD
 fi
 echo "   HEAD $(git -C "$work/lumen" rev-parse HEAD)"
 
@@ -73,8 +75,10 @@ PY
 
 if [ "${PATCH_LUA:-1}" = 1 ]; then
 	echo "== applying patches/lumen-aarch64.patch to lua/"
-	git apply --check --whitespace=nowarn "$patch_file"
-	git apply --whitespace=nowarn "$patch_file"
+	# core.autocrlf=true would CRLF-rewrite the checkout and break every hunk;
+	# embed-config.sh / embed-version.sh also require pure LF sources.
+	git -c core.autocrlf=false apply --check --whitespace=nowarn "$patch_file"
+	git -c core.autocrlf=false apply --whitespace=nowarn "$patch_file"
 fi
 
 # The installer recognises the patched helpers by these markers.

@@ -93,6 +93,9 @@ jobs:
           # The i386 table must not be compiled in: the arm64 build only ever
           # uses the block under #if SLS_ARCH_ARM64.
           grep -q 'arch=aarch64' /tmp/patterns.txt
+          # Guard against a vacuous pass: the parser must have found the full
+          # arm64 table, not zero patterns (grep would match "patterns=0").
+          test "$(grep -oP 'patterns=\K[0-9]+' /tmp/patterns.txt)" -ge 14
 
       - name: Build Lumen aarch64
         run: |
@@ -109,6 +112,53 @@ jobs:
           grep -qF 'steam.real' dist/lumen-arm64/lua/restart_steam.sh ||
             grep -qF 'steam\.real' dist/lumen-arm64/lua/restart_steam.sh
           unzip -l dist/lumen-arm64.zip | head -n 12
+
+      # Run after both archives exist: the installer downloads these zips and
+      # execs binaries from them, so what ships must be checked, not just the
+      # unpacked tree.
+      - name: Verify the release archives
+        shell: python
+        run: |
+          import struct, sys, zipfile
+          EM_ARM = 0xB7
+          def elf_machine(blob):
+              if blob[:4] != b"\x7fELF":
+                  return None
+              return struct.unpack_from("<H", blob, 18)[0]
+          ok = True
+          for zpath, members in (
+              ("dist/slsteam-arm64.zip", ("SLSsteam.so", "config.yaml", "version.txt", "LICENSE")),
+              ("dist/lumen-arm64.zip", ("lumen", "lua/loop.lua", "lua/slscheck.lua", "lua/restart_steam.sh", "lua/about.lua")),
+          ):
+              with zipfile.ZipFile(zpath) as zf:
+                  names = [n for n in zf.namelist() if not n.endswith("/")]
+                  for member in members:
+                      found = [n for n in names if n == member or n.endswith("/" + member)]
+                      if not found:
+                          print(f"{zpath}: missing {member}")
+                          ok = False
+                          continue
+                      blob = zf.read(found[0])
+                      if member in ("SLSsteam.so", "lumen") and elf_machine(blob) != EM_ARM:
+                          print(f"{zpath}/{found[0]}: ELF machine {elf_machine(blob)}, want {EM_ARM} (aarch64)")
+                          ok = False
+                      if member == "lua/loop.lua" and b"steam.real" not in blob:
+                          print(f"{zpath}/{found[0]}: does not know steam.real")
+                          ok = False
+                      if member == "lua/restart_steam.sh" \
+                          and b"steam.real" not in blob and b"steam\\.real" not in blob:
+                          print(f"{zpath}/{found[0]}: does not match steam.real")
+                          ok = False
+                      if member == "lua/slscheck.lua" and b"STEAM_COMMS" not in blob:
+                          print(f"{zpath}/{found[0]}: no STEAM_COMMS table")
+                          ok = False
+                  # A stale i386 archive must never ship.
+                  for n in names:
+                      m = elf_machine(zf.read(n))
+                      if m is not None and m != EM_ARM:
+                          print(f"{zpath}/{n}: non-aarch64 ELF (machine {m})")
+                          ok = False
+          sys.exit(0 if ok else 1)
 
       - name: Checksums
         run: |

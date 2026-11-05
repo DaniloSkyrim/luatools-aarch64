@@ -132,6 +132,38 @@ check "elf_arch: i386" test "$(elf_arch "$tmp/elf/i386.so")" = i386
 check_not "elf_arch rejects a text file" elf_arch "$tmp/elf/text"
 check_not "elf_arch rejects a missing file" elf_arch "$tmp/elf/nope"
 
+# ---- checksum sidecars -----------------------------------------------------
+# A missing sidecar is accepted; a mismatch must abort. The sha256sum-missing
+# case used to turn the empty digest into a fatal "mismatch".
+mkdir -p "$tmp/checksum"
+printf 'payload\n' > "$tmp/checksum/payload"
+sum=$("$py" -c \
+	'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' \
+	"$tmp/checksum/payload")
+cp "$tmp/checksum/payload" "$tmp/checksum/good"
+printf '%s  payload\n' "$sum" > "$tmp/checksum/good.sha256"
+check "fetch_verified accepts a matching sidecar" \
+	fetch_verified "file://$tmp/checksum/good" "$tmp/checksum/out1"
+printf 'tampered\n' > "$tmp/checksum/bad"
+printf '%s  bad\n' "$sum" > "$tmp/checksum/bad.sha256"
+check_not "fetch_verified rejects a checksum mismatch" \
+	fetch_verified "file://$tmp/checksum/bad" "$tmp/checksum/out2"
+check "a rejected download is removed" test ! -e "$tmp/checksum/out2"
+printf 'nosidecar\n' > "$tmp/checksum/nosidecar"
+check "fetch_verified accepts a missing sidecar" \
+	fetch_verified "file://$tmp/checksum/nosidecar" "$tmp/checksum/out3"
+
+# ensure_tmp must create a directory of its own and never adopt an inherited one.
+saved_tmp=${TMP:-}
+saved_created=${TMP_CREATED:-}
+TMP=""
+ensure_tmp
+check "ensure_tmp creates a scratch directory" test -d "$TMP"
+check "ensure_tmp remembers what it must clean up" test "$TMP_CREATED" = "$TMP"
+rm -rf "$TMP"
+TMP="$saved_tmp"; TMP_CREATED="$saved_created"
+
+
 # ---- SLSsteam --------------------------------------------------------------
 SLS_RELEASE_URL="file://$tmp/slsteam-arm64.zip"
 check "SLSsteam installs from the aarch64 asset" install_slsteam
@@ -325,7 +357,11 @@ mkdir -p "$PLUGIN_DIR/backend/data"
 printf '{"language":"pt-BR"}\n' > "$PLUGIN_DIR/backend/data/settings.json"
 printf '{"token":"abc"}\n' > "$PLUGIN_DIR/backend/api.json"
 
-install_sevenzip() { :; }   # the 7zz download is covered separately
+# The 7zz download is covered separately, and install_plugin would spend a
+# minute on it here; stub it, but restore the real function afterwards — the
+# 7zz checks below must exercise the installer code, not this stub.
+_install_sevenzip_real=$(declare -f install_sevenzip)
+install_sevenzip() { :; }
 PLUGIN_ZIP_URL="file://$tmp/luatools-linux.zip"
 check "plugin installs from the archive" install_plugin
 check "plugin manifest installed" test -f "$PLUGIN_DIR/plugin.json"
@@ -339,6 +375,11 @@ check "user settings survive a second reinstall" \
 	grep -q 'pt-BR' "$PLUGIN_DIR/backend/data/settings.json"
 check "no backup directory left behind" \
 	test -z "$(find "$LUMEN_DIR" -maxdepth 1 -name '.plugin-data.*' 2>/dev/null)"
+
+# Restore the real installer function: the stub above must not shadow the
+# 7zz checks that follow (a stubbed install_sevenzip makes them vacuous).
+eval "$_install_sevenzip_real"
+unset _install_sevenzip_real
 
 # The old x86-64 tree is migrated only for keys that do not exist yet.
 mkdir -p "$LEGACY_HOME/.local/share/Lumen/luatools/backend/data"
@@ -354,6 +395,19 @@ mkdir -p "$tmp/sevenzip"
 SEVENZIP_URL="file://$tmp/does-not-exist.tar.xz"
 check "missing 7zz download does not abort the install" install_sevenzip "$tmp/sevenzip"
 check "no bogus 7zz installed" test ! -e "$tmp/sevenzip/bin/7zz"
+
+# 7zz happy path: the official tarball ships 7zz at its root, and the installer
+# must land it as <backend>/bin/7zz (not <backend>/bin/bin/7zz or a missing file).
+mkdir -p "$tmp/sevenzip-src"
+cp "$tmp/elf/aarch64.exe" "$tmp/sevenzip-src/7zz"
+printf 'readme\n' > "$tmp/sevenzip-src/readme.txt"
+( cd "$tmp/sevenzip-src" && tar -cJf "$tmp/7z.tar.xz" . )
+SEVENZIP_URL="file://$tmp/7z.tar.xz"
+check "7zz installs from the official tarball" install_sevenzip "$tmp/backend"
+check "7zz is at <backend>/bin/7zz" test -s "$tmp/backend/bin/7zz"
+check "7zz is the aarch64 binary" \
+	test "$(elf_arch "$tmp/backend/bin/7zz")" = aarch64
+check "7zz tarball extras are not installed" test ! -e "$tmp/backend/bin/readme.txt"
 
 # ---- verification ---------------------------------------------------------
 check "verify passes on a complete install" verify

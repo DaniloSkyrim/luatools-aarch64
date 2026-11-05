@@ -1,0 +1,25 @@
+name: tests
+
+# Runs the offline installer test suite on a plain Linux runner. The suite is
+# written to work identically under Git Bash on Windows and on Linux (no
+# pgrep/pkill/setsid/zip), and this workflow is what proves the Linux half.
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'install.sh'
+      - 'tests/**'
+      - '.github/workflows/tests.yml'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the offline installer tests
+        run: bash tests/test-install.sh

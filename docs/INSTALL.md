@@ -97,11 +97,11 @@ Nada é apagado de `~/.droiddeck-x64`.
 ## Lumen
 
 O asset publicado é construído do `swwayps/lumen@52475c3` e recebe
-`patches/lumen-aarch64.patch`, que faz três coisas:
+`patches/lumen-aarch64.patch`, que faz cinco coisas:
 
 | Arquivo | Ajuste |
 |---|---|
-| `lua/proc.lua` / `lua/loop.lua` | o cliente roda como `steam.real`; a checagem de liveness testa os dois nomes |
+| `lua/loop.lua` | o cliente roda como `steam.real`; a checagem de liveness testa os dois nomes (`lua/proc.lua` é o scanner genérico e não é editado) |
 | `lua/slscheck.lua` | `STEAM_COMMS = {"steam", "steam.real"}` na detecção do SLSsteam |
 | `lua/restart_steam.sh` | `pgrep`/`pkill -x '(steam\|steam\.real)'` e reconhece o wrapper como launcher |
 | `lua/about.lua` | Update All executa a cópia local em `~/.local/share/Lumen/install.sh` (que o instalador deixa lá), não o instalador i386 upstream |

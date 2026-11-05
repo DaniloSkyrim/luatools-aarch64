@@ -27,7 +27,9 @@
 #    bash install.sh --help
 #
 #  Everything is written under $HOME inside the DroidDeck LinuxFS. Nothing
-#  outside the DroidDeck data directory is touched.
+#  outside it is touched except one idempotently-edited file:
+#  /usr/local/bin/droiddeck-steam-install (the update hook, only through a
+#  marked block; see install_steam_install_hook).
 # ============================================================================
 set -uo pipefail
 
@@ -73,8 +75,22 @@ die()  { printf '%sfail%s  %s\n' "$R" "$N" "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 TMP=""
-cleanup() { [ -n "$TMP" ] && rm -rf "$TMP"; }
+# Only the scratch directory this installer created itself is removed. TMP is
+# often inherited (tests export it; some environments point it at /tmp), and
+# deleting a directory we did not create is never acceptable.
+TMP_CREATED=""
+cleanup() { [ -n "$TMP_CREATED" ] && rm -rf "$TMP_CREATED"; }
 trap cleanup EXIT
+
+ensure_tmp() {
+	if [ -z "$TMP" ]; then
+		# A failed mktemp must abort: an empty TMP would turn every scratch path
+		# into a root-level one ("/hook-block").
+		TMP=$(mktemp -d) || die "could not create a temporary directory"
+		[ -n "$TMP" ] && [ -d "$TMP" ] || die "could not create a temporary directory"
+		TMP_CREATED=$TMP
+	fi
+}
 
 usage() {
 	cat <<'EOF'
@@ -138,7 +154,10 @@ fetch() {
 fetch_verified() {
 	local url="$1" out="$2" sum_url="$1.sha256" sum_file expected actual
 	fetch "$url" "$out" || return 1
-	if fetch "$sum_url" "$out.sha256" 2>/dev/null; then
+	# ensure_deps only warns when sha256sum is missing; without it there is
+	# nothing to compare against, so skip verification instead of treating an
+	# empty digest as a mismatch and aborting the whole install.
+	if have sha256sum && fetch "$sum_url" "$out.sha256" 2>/dev/null; then
 		expected=$(awk '{ print $1; exit }' "$out.sha256" 2>/dev/null)
 		rm -f "$out.sha256"
 		if [ -n "$expected" ]; then
@@ -190,7 +209,8 @@ ensure_deps() {
 		have "$p" || missing+=("$p")
 	done
 	[ "${#missing[@]}" -eq 0 ] || die "missing required tools: ${missing[*]}"
-	have sha256sum || warn "sha256sum is missing; release checksums are not verified"
+	have sha256sum || warn "sha256sum is missing; release checksums are not verified. \
+A corrupted download would be unpacked and installed."
 	ok "required tools present"
 }
 
@@ -198,7 +218,7 @@ ensure_deps() {
 # SLSsteam aarch64
 # ----------------------------------------------------------------------------
 install_slsteam() {
-	TMP="${TMP:-$(mktemp -d)}"
+	ensure_tmp
 	local zip="$TMP/slsteam-arm64.zip" root="$TMP/slsteam" so
 	step "downloading SLSsteam aarch64"
 	fetch_verified "$SLS_RELEASE_URL" "$zip" || die \
@@ -276,7 +296,7 @@ EOF
 # Lumen (aarch64)
 # ----------------------------------------------------------------------------
 install_lumen() {
-	TMP="${TMP:-$(mktemp -d)}"
+	ensure_tmp
 	local zip="$TMP/lumen-arm64.zip" root="$TMP/lumen" bin
 	step "downloading Lumen aarch64"
 	fetch_verified "$LUMEN_RELEASE_URL" "$zip" || die \
@@ -359,6 +379,7 @@ replace_installer_url() {
 # ----------------------------------------------------------------------------
 install_sevenzip() {
 	mkdir -p "$1/bin"
+	ensure_tmp
 	local dest="$1/bin/7zz"
 	local tmpd="$TMP/7z"
 	mkdir -p "$tmpd"
@@ -367,9 +388,13 @@ install_sevenzip() {
 		local z
 		z="$(find "$tmpd" -maxdepth 3 -type f -name 7zz | head -n1)"
 		if [ -n "$z" ] && [ "$(elf_arch "$z")" = "aarch64" ]; then
-			install -m 0755 "$z" "$dest"
-			ok "aarch64 7zz installed for the plugin backend"
-			return 0
+			# A filesystem without exec bits (or a read-only mount) can make the
+			# copy fail; check the file instead of trusting the exit status alone.
+			if install -m 0755 "$z" "$dest" 2>/dev/null && [ -s "$dest" ]; then
+				ok "aarch64 7zz installed for the plugin backend"
+				return 0
+			fi
+			warn "could not install the downloaded 7zz to $dest"
 		fi
 	fi
 	warn "could not fetch the official aarch64 7zz; falling back to p7zip"
@@ -389,7 +414,7 @@ install_sevenzip() {
 }
 
 install_plugin() {
-	TMP="${TMP:-$(mktemp -d)}"
+	ensure_tmp
 	local zip="$TMP/luatools-linux.zip" root="$TMP/plugin" pj srcdir
 	step "downloading the LuaTools plugin"
 	fetch "$PLUGIN_ZIP_URL" "$zip" || die "could not download luatools-linux.zip"
@@ -424,7 +449,17 @@ install_plugin() {
 
 	rm -rf "$dest"
 	mkdir -p "$dest"
-	cp -r "$srcdir"/. "$dest"/
+	# A failed copy (full disk, I/O error) must not leave a half-written plugin
+	# tree that looks installed: restore the backup and abort.
+	if ! cp -r "$srcdir"/. "$dest"/; then
+		rm -rf "$dest"
+		if [ -n "$data_bak" ]; then
+			mkdir -p "$dest/backend/data"
+			cp -a "$data_bak/." "$dest/backend/data/" 2>/dev/null || true
+		fi
+		[ -z "$api_bak" ] || cp -a "$api_bak" "$dest/backend/api.json" 2>/dev/null || true
+		die "could not copy the LuaTools plugin into $dest; the previous install was restored"
+	fi
 
 	if [ -n "$data_bak" ]; then
 		mkdir -p "$dest/backend/data"
@@ -498,7 +533,8 @@ esac
 
 # Never let an inherited auditor list survive: this script itself sets the only
 # one the client should see, and an inherited copy would be loaded twice.
-old_ifs="$IFS"; IFS=:
+# -f keeps a path like /usr/lib/*/libfoo.so from globbing while we split on ':'.
+old_ifs="$IFS"; IFS=:; set -f
 clean=""
 for a in ${LD_AUDIT:-}; do
 	case "$a" in
@@ -506,7 +542,7 @@ for a in ${LD_AUDIT:-}; do
 	esac
 	clean="${clean:+$clean:}$a"
 done
-IFS="$old_ifs"
+set +f; IFS="$old_ifs"
 if [ -n "$clean" ]; then
 	export LD_AUDIT="$clean"
 else
@@ -598,14 +634,31 @@ is_elf() {
 	[ -f "$1" ] && [ "$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')" = "7f454c46" ]
 }
 
+# install(1) is not atomic: a client launched mid-copy would exec a half-written
+# wrapper. Stage next to the target (same filesystem) and rename, which is.
+install_wrapper() {
+	local tmp="$STEAM_BIN.luatools-new.$$"
+	cp -f "$WRAPPER_SRC" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+	chmod 0755 "$tmp" 2>/dev/null
+	mv -f "$tmp" "$STEAM_BIN" || { rm -f "$tmp"; return 1; }
+}
+
 if is_wrapper "$STEAM_BIN"; then
 	# A new installer version may carry a newer wrapper; keep it current.
 	if [ -f "$STEAM_REAL" ]; then
 		chmod 0755 "$STEAM_REAL" 2>/dev/null
-		install -m 0755 "$WRAPPER_SRC" "$STEAM_BIN"
+		install_wrapper || {
+			echo "SLSsteam: could not refresh the wrapper at $STEAM_BIN" >&2
+			exit 1
+		}
 		exit 0
 	fi
-	echo "SLSsteam: $STEAM_BIN is a wrapper but $STEAM_REAL is missing" >&2
+	# steam.real gone but steam is still our wrapper: the client was replaced
+	# without the Valve launcher ever appearing (a copy that failed midway).
+	# Fail loudly but keep the wrapper running the last thing it can: without
+	# steam.real nothing works, and destroying the wrapper would leave steam
+	# missing entirely. droiddeck-steam-install must re-download the client.
+	echo "SLSsteam: $STEAM_BIN is a wrapper but $STEAM_REAL is missing; the client needs reinstalling" >&2
 	exit 1
 fi
 
@@ -623,7 +676,7 @@ fi
 [ -f "$STEAM_REAL" ] || { echo "SLSsteam: $STEAM_REAL is missing" >&2; exit 1; }
 chmod 0755 "$STEAM_REAL" 2>/dev/null
 [ -x "$STEAM_REAL" ] || echo "SLSsteam: warning: $STEAM_REAL is not executable" >&2
-install -m 0755 "$WRAPPER_SRC" "$STEAM_BIN" || exit 1
+install_wrapper || { echo "SLSsteam: could not install the wrapper at $STEAM_BIN" >&2; exit 1; }
 echo "SLSsteam: wrapper applied to $STEAM_BIN"
 APPLY
 	sed -i "s|__STEAM_BIN__|$STEAM_BIN|g; s|__STEAM_REAL__|$STEAM_REAL|g; s|__WRAPPER__|$WRAPPER_SRC|g" "$APPLY_WRAP"
@@ -648,7 +701,12 @@ install_steam_install_hook() {
 	local f="$STEAM_INSTALL"
 	[ -f "$f" ] || { warn "$f not found; the wrapper is only re-applied by this installer"; return 0; }
 	grep -qF "$MARK_BEGIN" "$f" && { ok "droiddeck-steam-install already hooked"; return 0; }
-	[ -w "$f" ] || { warn "$f is not writable; skipping the update hook"; return 0; }
+	# The rewrite stages a sibling temp file and renames it, so the directory
+	# must be writable, not just the file.
+	[ -w "$f" ] && [ -w "$(dirname "$f")" ] || {
+		warn "$f is not writable; skipping the update hook"
+		return 0
+	}
 
 	local anchor='chmod +x "$steam_root/steamrtarm64/steam" 2>/dev/null || true'
 	grep -qxF "$anchor" "$f" || {
@@ -656,6 +714,7 @@ install_steam_install_hook() {
 		return 0
 	}
 
+	ensure_tmp
 	local block="$TMP/hook-block"
 	cat > "$block" <<EOF
 $MARK_BEGIN
@@ -665,17 +724,27 @@ if [ -x "\$HOME/.local/share/SLSsteam/apply-wrap.sh" ]; then
 fi
 $MARK_END
 EOF
+	# A failed block write (full disk) must not let the awk below splice an
+	# empty block and still report the hook as installed.
+	[ -s "$block" ] || { warn "could not write the hook block; skipping the update hook"; return 0; }
 	awk -v anchor="$anchor" -v block="$block" '
 		{ print }
 		$0 == anchor && !done {
 			while ((getline line < block) > 0) print line
 			close(block); done = 1
 		}
-	' "$f" > "$f.luatools-new" && cat "$f.luatools-new" > "$f" && rm -f "$f.luatools-new" || {
+		END { exit done ? 0 : 1 }
+	' "$f" > "$f.luatools-new" || { rm -f "$f.luatools-new"; warn "could not hook $f"; return 0; }
+	# Keep the original mode (a session bootstrap must stay executable) and swap
+	# atomically: an interrupted rewrite must never leave a truncated script.
+	chmod --reference="$f" "$f.luatools-new" 2>/dev/null || chmod 0755 "$f.luatools-new"
+	if mv -f "$f.luatools-new" "$f"; then
+		ok "droiddeck-steam-install re-applies the wrapper after client updates"
+	else
+		rm -f "$f.luatools-new"
 		warn "could not hook $f"
 		return 0
-	}
-	ok "droiddeck-steam-install re-applies the wrapper after client updates"
+	fi
 }
 
 uninstall_steam_install_hook() {
@@ -686,8 +755,14 @@ uninstall_steam_install_hook() {
 		index($0, b) == 1 { skip = 1; next }
 		skip { if (index($0, e) == 1) skip = 0; next }
 		{ print }
-	' "$f" > "$f.luatools-new" && cat "$f.luatools-new" > "$f" && rm -f "$f.luatools-new" && \
+	' "$f" > "$f.luatools-new" || { rm -f "$f.luatools-new"; return 0; }
+	# Keep the original mode (the script must stay executable) and swap atomically.
+	chmod --reference="$f" "$f.luatools-new" 2>/dev/null || chmod 0755 "$f.luatools-new"
+	if mv -f "$f.luatools-new" "$f"; then
 		ok "droiddeck-steam-install hook removed"
+	else
+		rm -f "$f.luatools-new"
+	fi
 }
 
 # The previous x86-64 setup patched droiddeck-steam-x64 to start Lumen and
@@ -706,8 +781,14 @@ cleanup_x86_launcher() {
 		/^# >>> SLSSTEAM-X64-INJECT/ { skip = 1; next }
 		skip { if ($0 ~ /^# <<< SLSSTEAM-X64-INJECT/) skip = 0; next }
 		{ print }
-	' "$f" > "$f.luatools-new" && cat "$f.luatools-new" > "$f" && rm -f "$f.luatools-new" && \
+	' "$f" > "$f.luatools-new" || { rm -f "$f.luatools-new"; return 0; }
+	# Keep the original mode and swap atomically, as with the update hook.
+	chmod --reference="$f" "$f.luatools-new" 2>/dev/null || chmod 0755 "$f.luatools-new"
+	if mv -f "$f.luatools-new" "$f"; then
 		ok "x86-64 launcher patch removed"
+	else
+		rm -f "$f.luatools-new"
+	fi
 }
 
 # Keep a copy of this installer where Lumen's Update All / auto-fix expect it.
@@ -758,10 +839,15 @@ verify() {
 do_uninstall() {
 	step "restoring the Steam launcher"
 	uninstall_steam_install_hook
-	if grep -qF "SLSsteam launcher wrapper" "$STEAM_BIN" 2>/dev/null && [ -f "$STEAM_REAL" ]; then
+	# Only restore when the client is provably our wrapper: swapping a foreign
+	# 'steam' (a Valve update mid-flight, another launcher) against steam.real
+	# would destroy one of the two. Valve's ELF is always safe to keep.
+	if [ -f "$STEAM_REAL" ] && grep -qF "SLSsteam launcher wrapper" "$STEAM_BIN" 2>/dev/null; then
 		mv -f "$STEAM_REAL" "$STEAM_BIN" && ok "steam.real restored as steam"
 	elif [ -f "$STEAM_REAL" ] && [ ! -f "$STEAM_BIN" ]; then
 		mv -f "$STEAM_REAL" "$STEAM_BIN" && ok "steam.real restored as steam"
+	elif [ -f "$STEAM_REAL" ]; then
+		warn "$STEAM_BIN is not the LuaTools wrapper; leaving both 'steam' and 'steam.real' in place"
 	fi
 
 	step "stopping Lumen"

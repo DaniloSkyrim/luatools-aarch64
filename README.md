@@ -16,7 +16,9 @@ cliente x86-64 emulado por FEX **não** é usado nem alterado.
    normal e deixe `~/.local/share/Steam/steamrtarm64/steamclient.so` aparecer.
 2. Terminal dentro do desktop Linux do DroidDeck (host aarch64).
 
-O instalador não instala nada fora de `$HOME` (DroidDeck LinuxFS).
+O instalador escreve tudo dentro de `$HOME` (DroidDeck LinuxFS). A única exceção
+é `/usr/local/bin/droiddeck-steam-install`, que recebe o bloco de hook marcado
+(editado de forma idempotente; ver abaixo).
 
 ## Instalação
 
@@ -151,7 +153,8 @@ patches/slsteam-aarch64.patch     port aarch64 do SLSsteam
 patches/lumen-aarch64.patch       ajustes do Lumen para steam.real
 build/build-slsteam-arm64.sh      build + validação + empacotamento
 build/build-lumen-arm64.sh        build + empacotamento do Lumen
-.github/workflows/                CI no runner ARM64 que publica a release
+.github/workflows/                CI no runner ARM64 que publica a release;
+                                  tests.yml roda a suíte offline em Linux
 tools/check_patterns.py           validador de assinaturas (--arch aarch64|x86)
 tools/fetch_steam_aarch64.py      baixa o steamclient.so arm64 do CDN
 tests/test-install.sh             testes offline do instalador

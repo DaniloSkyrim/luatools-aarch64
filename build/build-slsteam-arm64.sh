@@ -47,10 +47,12 @@ fi
 
 echo "== cloning AceSLS/SLSsteam@$EXPECTED"
 rm -rf "$work/src"
-git init -q "$work/src"
+# -c core.autocrlf=false: Git-for-Windows defaults to CRLF working trees, which
+# breaks the LF-only patch and the embed-*.sh helpers downstream.
+git -c core.autocrlf=false init -q "$work/src"
 git -C "$work/src" remote add origin https://github.com/AceSLS/SLSsteam.git
 git -C "$work/src" fetch --depth 1 origin "$EXPECTED"
-git -C "$work/src" checkout -q FETCH_HEAD
+git -c core.autocrlf=false -C "$work/src" checkout -q FETCH_HEAD
 actual=$(git -C "$work/src" rev-parse HEAD)
 if [ "${SLS_ALLOW_MOVE:-0}" != 1 ] && [ "$actual" != "$EXPECTED" ]; then
 	echo "upstream moved: HEAD $actual, validated $EXPECTED" >&2
@@ -60,7 +62,10 @@ fi
 echo "   HEAD $actual"
 
 echo "== applying patches/slsteam-aarch64.patch"
-git -C "$work/src" apply --whitespace=nowarn "$patch_file"
+# core.autocrlf=true (the Git-for-Windows default) would rewrite the working
+# tree to CRLF before the patch applies and fail every hunk; pin the setting
+# for this checkout only.
+git -c core.autocrlf=false -C "$work/src" apply --whitespace=nowarn "$patch_file"
 
 # Guard against a patch that applied but left the broken signature behind: the
 # aarch64 client moved the tail of CUser::UpdateAppOwnershipTicket, so the last
