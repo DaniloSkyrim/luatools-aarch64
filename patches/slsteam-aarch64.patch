@@ -2519,31 +2519,10 @@ index d6ba446..31fb4b3 100644
  		{
  			const uint64_t oldId = depot->manifestId;
  			depot->manifestId = manifestOverrides->at(depot->depotId);
-@@ -90,6 +146,145 @@ void Apps::buildDepotDependency(CUtlVector<DepotInfo_t>* depots, CUtlVector<Depo
+@@ -90,6 +146,113 @@ void Apps::buildDepotDependency(CUtlVector<DepotInfo_t>* depots, CUtlVector<Depo
  	}
  }
  
-+static bool depotMatchesClientPlatform(IClientApps* apps, const AppId_t appId,
-+	const uint32_t depotId)
-+{
-+	if (!apps)
-+	{
-+		return true;
-+	}
-+
-+	char value[64] { };
-+	const auto key = "depots/" + std::to_string(depotId) + "/config/oslist";
-+	const auto len = apps->getAppData(appId, key.c_str(), value, sizeof(value));
-+	if (len <= 0)
-+	{
-+		//appinfo not loaded yet: keep the depot instead of silently dropping content
-+		return true;
-+	}
-+
-+	const std::string oslist(value, strnlen(value, sizeof(value)));
-+	return oslist.empty() || oslist.find("linux") != std::string::npos;
-+}
-+
 +void Apps::injectManagedDepots(const AppId_t appId, CUtlVector<DepotInfo_t>* depots)
 +{
 +	if (!depots || appId == 0 || !g_config.isAddedAppId(appId))
@@ -2568,21 +2547,10 @@ index d6ba446..31fb4b3 100644
 +	const auto storePaths = getManifestStorePaths();
 +	const bool storeReady = ManifestStore::valid(storePaths);
 +
-+	const auto user = g_pSteamEngine ? g_pSteamEngine->getUser(0) : nullptr;
-+	IClientApps* apps = user ? user->getClientApps() : nullptr;
-+
 +	unsigned int injected = 0;
 +	for (const auto depotId : depotIds)
 +	{
 +		if (depotBlacklist->contains(depotId))
-+		{
-+			continue;
-+		}
-+
-+		//The catalog lists every platform's depot. Steam normally drops the
-+		//foreign ones from the dependency, which we bypass, so match the client
-+		//platform here or the planner would fetch windows/macos content too.
-+		if (!depotMatchesClientPlatform(apps, appId, depotId))
 +		{
 +			continue;
 +		}
