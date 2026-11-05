@@ -328,7 +328,10 @@ patch_lumen_bundle() {
 	if [ -f "$slscheck" ] && ! grep -q 'STEAM_COMMS' "$slscheck"; then
 		warn "Lumen slscheck.lua does not list steam.real; SLSsteam detection may report a miss"
 	fi
-	if [ -f "$restart" ] && ! grep -qF 'steam.real' "$restart"; then
+	# The upstream script matches with pgrep -x '(steam|steam\.real)', so the
+	# asset carries the escaped form; accept either spelling.
+	if [ -f "$restart" ] && \
+		! grep -qF 'steam.real' "$restart" && ! grep -qF 'steam\.real' "$restart"; then
 		warn "Lumen restart_steam.sh only matches 'steam'; Restart Steam may refuse to run"
 	fi
 }

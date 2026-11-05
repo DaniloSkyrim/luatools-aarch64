@@ -9261,10 +9261,10 @@ index 0000000..c491d27
 +}
 diff --git a/tools/build-libs-arm64.sh b/tools/build-libs-arm64.sh
 new file mode 100644
-index 0000000..1b41c7f
+index 0000000..5e6fe6a
 --- /dev/null
 +++ b/tools/build-libs-arm64.sh
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,185 @@
 +#!/usr/bin/env bash
 +#
 +# Builds the static libraries SLSsteam links into lib/arm64.
@@ -9400,11 +9400,6 @@ index 0000000..1b41c7f
 +#Its Linux glob also picks the generic src/linux/ptrace/*.c, which is needed for
 +#ptrace_attach/read/write/detach and friends; the <sys/reg.h> it includes is
 +#covered by the shim above.
-+#Fedora style distros install keystone into llvm/lib64, while libmem hardcodes
-+#llvm/lib. Fall back to lib64 when the hardcoded path has no library.
-+if ! grep -q 'keystone-engine-build/llvm/lib64' "$BUILD/libmem/CMakeLists.txt"; then
-+	perl -0777 -pi -e 's{set\(KEYSTONE_IMPORT_DIR "([^"]*)/llvm/lib"\)}{set(KEYSTONE_IMPORT_DIR "$1/llvm/lib")\nif(NOT EXISTS "\${KEYSTONE_IMPORT_DIR}/\${CMAKE_STATIC_LIBRARY_PREFIX}keystone\${CMAKE_STATIC_LIBRARY_SUFFIX}")\n\tset(KEYSTONE_IMPORT_DIR "$1/llvm/lib64")\nendif()}g' "$BUILD/libmem/CMakeLists.txt"
-+fi
 +cmake_lib "$BUILD/libmem" "$BUILD/libmem-build" \
 +	${EXTRA_CMAKE[@]+"${EXTRA_CMAKE[@]}"} \
 +	-DLIBMEM_ARCH=aarch64 \

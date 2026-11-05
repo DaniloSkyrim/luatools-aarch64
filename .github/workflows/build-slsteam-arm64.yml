@@ -106,7 +106,8 @@ jobs:
           file -b dist/lumen-arm64/lumen | grep -q 'aarch64'
           grep -qF 'steam.real' dist/lumen-arm64/lua/loop.lua
           grep -qF 'STEAM_COMMS' dist/lumen-arm64/lua/slscheck.lua
-          grep -qF 'steam.real' dist/lumen-arm64/lua/restart_steam.sh
+          grep -qF 'steam.real' dist/lumen-arm64/lua/restart_steam.sh ||
+            grep -qF 'steam\.real' dist/lumen-arm64/lua/restart_steam.sh
           unzip -l dist/lumen-arm64.zip | head -n 12
 
       - name: Checksums

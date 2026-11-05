@@ -84,7 +84,8 @@ grep -q 'STEAM_COMMS' lua/slscheck.lua || {
 	echo "lua/slscheck.lua does not list steam.real" >&2
 	exit 1
 }
-grep -qF 'steam.real' lua/restart_steam.sh || {
+# pgrep -x in that script uses a regex, so the asset carries 'steam\.real'.
+grep -qF 'steam.real' lua/restart_steam.sh || grep -qF 'steam\.real' lua/restart_steam.sh || {
 	echo "lua/restart_steam.sh does not match steam.real" >&2
 	exit 1
 }
