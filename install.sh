@@ -192,7 +192,7 @@ fix_ownership() {
 	owner=$(stat -c '%u:%g' "$HOME" 2>/dev/null) || return 0
 	[ "$owner" = "0:0" ] && return 0
 	local dir
-	for dir in "$SLS_DIR" "$LUMEN_DIR" "$CONFIG_DIR"; do
+	for dir in "$SLS_DIR" "$LUMEN_DIR" "$CONFIG_DIR" "$STEAMRT"; do
 		[ -e "$dir" ] && chown -R "$owner" "$dir" 2>/dev/null
 	done
 	return 0
