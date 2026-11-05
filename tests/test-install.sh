@@ -103,12 +103,29 @@ cat > "$tmp/bin/droiddeck-steam-install" <<'SH'
 #!/bin/bash
 set -eu
 steam_root="$HOME/.local/share/Steam"
+sync=
+stamp="$steam_root/package/droiddeck-installed"
+# (fixture: the exact early-exit line the real script has, so the installer's
+# session-start splice matches it verbatim)
+[ -z "$sync" ] && [ -x "$steam_root/steamrtarm64/steam" ] && [ -f "$stamp" ] && exit 0
 mkdir -p "$steam_root/steamrtarm64"
 # (test fixture: the real script downloads the client here)
 chmod +x "$steam_root/steamrtarm64/steam" 2>/dev/null || true
 echo "droiddeck-steam-install done"
 SH
 chmod +x "$tmp/bin/droiddeck-steam-install"
+# A .droiddeck-staged fixture so refresh_staged_manifest has something to edit.
+# On the device the manifest lives at /usr/local/.droiddeck-staged and its keys
+# are relative to /usr/local ("usr/local/bin/droiddeck-steam-install"). The
+# tests mount the same layout under $tmp via DROIDDECK_STAGED_PREFIX, with the
+# key "bin/droiddeck-steam-install".
+cat > "$tmp/.droiddeck-staged" <<EOF
+/app/base.apk 93514065 1793800264000
+bin/droiddeck-steam-install	9316 1793875642000 true
+bin/droiddeck-desktop	7143 1793823729000 true
+EOF
+export DROIDDECK_STAGED="$tmp/.droiddeck-staged"
+export DROIDDECK_STAGED_PREFIX="$tmp"
 cat > "$tmp/bin/droiddeck-steam-x64" <<'SH'
 #!/bin/bash
 echo "droiddeck-steam-x64"
@@ -314,16 +331,32 @@ check "steam is the wrapper again" \
 
 # ---- droiddeck-steam-install hook -----------------------------------------
 check "hook installed" grep -qF "$MARK_BEGIN" "$STEAM_INSTALL"
-check "hook installed once" \
-	test "$(grep -cF "$MARK_BEGIN" "$STEAM_INSTALL")" -eq 1
+check "hook installed exactly twice (session start + reinstall)" \
+	test "$(grep -cF "$MARK_BEGIN" "$STEAM_INSTALL")" -eq 2
 check "hook keeps the script valid" bash -n "$STEAM_INSTALL"
 check "hook runs apply-wrap.sh" grep -qF 'SLSsteam/apply-wrap.sh' "$STEAM_INSTALL"
+check "hook is placed before the early exit" \
+	test "$(grep -n 'steamrtarm64/steam" ] && \[ -f "\$stamp" \]' "$STEAM_INSTALL" | cut -d: -f1 | head -n1)" \
+		-ge "$(grep -nF "$MARK_BEGIN" "$STEAM_INSTALL" | head -n1 | cut -d: -f1)"
 check "hook is placed after the client chmod" \
 	test "$(grep -n 'chmod +x "\$steam_root/steamrtarm64/steam"' "$STEAM_INSTALL" | cut -d: -f1)" \
-		-lt "$(grep -nF "$MARK_BEGIN" "$STEAM_INSTALL" | cut -d: -f1)"
+		-lt "$(grep -nF "$MARK_BEGIN" "$STEAM_INSTALL" | tail -n1 | cut -d: -f1)"
 check "hook install is idempotent" install_steam_install_hook
-check "hook still installed once" \
-	test "$(grep -cF "$MARK_BEGIN" "$STEAM_INSTALL")" -eq 1
+check "hook still installed exactly twice" \
+	test "$(grep -cF "$MARK_BEGIN" "$STEAM_INSTALL")" -eq 2
+check "staged manifest line refreshed for the hook" \
+	grep -qF 'bin/droiddeck-steam-install' "$DROIDDECK_STAGED"
+# The manifest must carry the size the hooked file actually has now, or the app
+# re-extracts the original (and the hook dies) on the next session start.
+staged_size=$(awk -F'\t' '$1 == "bin/droiddeck-steam-install" { split($2, a, " "); print a[1] }' "$DROIDDECK_STAGED")
+check "staged manifest carries the hooked file's real size" \
+	test "$staged_size" = "$(wc -c < "$STEAM_INSTALL")"
+check "staged manifest keeps the other entries" \
+	grep -qF 'bin/droiddeck-desktop' "$DROIDDECK_STAGED"
+
+# Simulate what the app does when the manifest and the file agree: the hook
+# must survive (nothing rewrites the script, so the marker count is stable).
+check "hook file still parses after manifest refresh" bash -n "$STEAM_INSTALL"
 
 # ---- legacy x86-64 launcher cleanup ---------------------------------------
 printf '%s\n' '#!/bin/bash' 'echo launcher' > "$STEAM_X64_LAUNCHER.new"
@@ -421,9 +454,15 @@ check "7zz tarball extras are not installed" test ! -e "$tmp/backend/bin/readme.
 check "verify passes on a complete install" verify
 
 # ---- uninstall -------------------------------------------------------------
+# ---- uninstall: the hook and the manifest entry go back to stock ------------
 check "uninstall hook removal" uninstall_steam_install_hook
 check_not "hook marker gone" grep -qF "$MARK_BEGIN" "$STEAM_INSTALL"
 check "hook script still valid" bash -n "$STEAM_INSTALL"
+check "hook gone from the early-exit path" \
+	test "$(grep -cF "$MARK_BEGIN" "$STEAM_INSTALL")" -eq 0
+staged_size=$(awk -F'\t' '$1 == "bin/droiddeck-steam-install" { split($2, a, " "); print a[1] }' "$DROIDDECK_STAGED")
+check "staged manifest tracks the unhooked size" \
+	test "$staged_size" = "$(wc -c < "$STEAM_INSTALL")"
 check "uninstall" do_uninstall
 check "steam launcher restored to the client" \
 	test "$(elf_arch "$STEAM_BIN")" = aarch64

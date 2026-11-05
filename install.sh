@@ -19,7 +19,7 @@
 #    5. A launcher wrapper: steamrtarm64/steam -> steam.real, so SLSsteam is
 #       injected through LD_AUDIT and Lumen starts with the client
 #    6. An idempotent hook in droiddeck-steam-install that re-applies the
-#       wrapper after a Steam client update
+#       wrapper at every session start and after a Steam client update
 #
 #  Usage:
 #    curl -fsSL https://raw.githubusercontent.com/DaniloSkyrim/luatools-aarch64/main/install.sh | bash
@@ -27,9 +27,13 @@
 #    bash install.sh --help
 #
 #  Everything is written under $HOME inside the DroidDeck LinuxFS. Nothing
-#  outside it is touched except one idempotently-edited file:
-#  /usr/local/bin/droiddeck-steam-install (the update hook, only through a
-#  marked block; see install_steam_install_hook).
+#  outside it is touched except two idempotently-edited files:
+#  * /usr/local/bin/droiddeck-steam-install (the update hook, only through a
+#    marked block; see install_steam_install_hook)
+#  * /usr/local/.droiddeck-staged — one line is refreshed so DroidDeck's
+#    "did anything change under /usr/local?" check keeps accepting the hooked
+#    script instead of re-extracting the original from the APK on every session
+#    (see refresh_staged_manifest).
 # ============================================================================
 set -uo pipefail
 
@@ -58,6 +62,11 @@ STEAM_INSTALL="${DROIDDECK_STEAM_INSTALL:-/usr/local/bin/droiddeck-steam-install
 STEAM_X64_LAUNCHER="${DROIDDECK_STEAM_X64:-/usr/local/bin/droiddeck-steam-x64}"
 MARK_BEGIN="# >>> LUATOOLS-AARCH64"
 MARK_END="# <<< LUATOOLS-AARCH64"
+# DroidDeck re-extracts every file listed in this manifest whose size or mtime
+# no longer match what the APK shipped, which silently reverts the hook. The
+# manifest records "size mtime_ms"; refresh_staged_manifest rewrites our file's
+# line to the patched reality.
+STAGED_MANIFEST="${DROIDDECK_STAGED:-/usr/local/.droiddeck-staged}"
 LEGACY_HOME="$HOME/.droiddeck-x64"
 
 # ----------------------------------------------------------------------------
@@ -169,6 +178,22 @@ fetch_verified() {
 			}
 		fi
 	fi
+	return 0
+}
+
+# Running as real root (adb + su inside the DroidDeck LinuxFS) would leave the
+# payload owned by root while the Steam client runs as the Android app's uid,
+# which cannot even open Lumen's log. Everything the client touches must carry
+# the same ownership as $HOME, which the app created as its own uid.
+fix_ownership() {
+	[ "$(id -u)" = "0" ] || return 0
+	local owner
+	owner=$(stat -c '%u:%g' "$HOME" 2>/dev/null) || return 0
+	[ "$owner" = "0:0" ] || return 0
+	local dir
+	for dir in "$SLS_DIR" "$LUMEN_DIR" "$CONFIG_DIR"; do
+		[ -e "$dir" ] && chown -R --reference="$HOME" "$dir" 2>/dev/null
+	done
 	return 0
 }
 
@@ -694,23 +719,66 @@ install_launcher_wrapper() {
 	install_steam_install_hook
 }
 
-# Hook droiddeck-steam-install right after it restores the launcher. It runs at
-# the start of every session and after every client update, so the wrapper is
-# re-applied without systemd (the DroidDeck guest has no user services).
+# DroidDeck stages /usr/local from its APK and re-extracts any file whose size
+# or mtime drifts from usr/local/.droiddeck-staged (lines are
+# "<path>\t<size> <mtime_ms> <flag>"). Our hook edits droiddeck-steam-install,
+# so without this the hook is silently reverted on the next session start.
+# Rewriting the file's line keeps the app's check green without touching the
+# APK or anything else in the manifest.
+refresh_staged_manifest() {
+	local f="$STEAM_INSTALL"
+	[ -f "$STAGED_MANIFEST" ] && [ -f "$f" ] || return 0
+	# Manifest keys are relative to /usr/local (e.g.
+	# "usr/local/bin/droiddeck-steam-install"); the real STEAM_INSTALL lives at
+	# /usr/local/bin/droiddeck-steam-install. DROIDDECK_STAGED_PREFIX lets the
+	# tests mount the same layout elsewhere; anything else outside /usr/local
+	# has no manifest entry to refresh.
+	local key prefix="${DROIDDECK_STAGED_PREFIX:-/usr/local}"
+	case $f in
+		"$prefix"/*) key="${f#"$prefix"/}" ;;
+		*) return 0 ;;
+	esac
+	grep -q "^$key	" "$STAGED_MANIFEST" 2>/dev/null || return 0
+	local size ms tmp
+	size=$(wc -c < "$f") || return 0
+	# The app stamps the manifest with millisecond mtimes; mirror that format.
+	ms=$(stat -c '%Y' "$f")000
+	tmp="$STAGED_MANIFEST.luatools-new"
+	awk -v key="$key" -v size="$size" -v ms="$ms" '
+		BEGIN { FS = "\t"; OFS = "\t" }
+		$1 == key { print $1, size " " ms, $3; done = 1; next }
+		{ print }
+		END { exit done ? 0 : 1 }
+	' "$STAGED_MANIFEST" > "$tmp" || { rm -f "$tmp"; return 0; }
+	if mv -f "$tmp" "$STAGED_MANIFEST"; then
+		ok "droiddeck-staged updated; the hook survives DroidDeck's re-extraction"
+	else
+		rm -f "$tmp"
+		warn "could not refresh .droiddeck-staged; DroidDeck may revert the hook"
+	fi
+}
+
+# Hook droiddeck-steam-install at two points:
+#   * before its early exit — this is the one that matters on every session
+#     start. The client self-update (or a repair) restores Valve's ELF behind
+#     the wrapper and still leaves the installed stamp, so the script would
+#     exit before reaching any hook placed at the bottom; the wrapper would
+#     never come back. apply-wrap.sh is a no-op when the launcher is already
+#     the wrapper, so running it unconditionally here is cheap.
+#   * after the chmod of a freshly downloaded client — covers the reinstall
+#     path where the early exit does not trigger.
+# It runs at the start of every session and after every client update, so the
+# wrapper is re-applied without systemd (the DroidDeck guest has no user
+# services).
+EARLY_EXIT='[ -z "$sync" ] && [ -x "$steam_root/steamrtarm64/steam" ] && [ -f "$stamp" ] && exit 0'
+
 install_steam_install_hook() {
 	local f="$STEAM_INSTALL"
 	[ -f "$f" ] || { warn "$f not found; the wrapper is only re-applied by this installer"; return 0; }
-	grep -qF "$MARK_BEGIN" "$f" && { ok "droiddeck-steam-install already hooked"; return 0; }
 	# The rewrite stages a sibling temp file and renames it, so the directory
 	# must be writable, not just the file.
 	[ -w "$f" ] && [ -w "$(dirname "$f")" ] || {
 		warn "$f is not writable; skipping the update hook"
-		return 0
-	}
-
-	local anchor='chmod +x "$steam_root/steamrtarm64/steam" 2>/dev/null || true'
-	grep -qxF "$anchor" "$f" || {
-		warn "could not find the client chmod line in $f; skipping the update hook"
 		return 0
 	}
 
@@ -727,23 +795,63 @@ EOF
 	# A failed block write (full disk) must not let the awk below splice an
 	# empty block and still report the hook as installed.
 	[ -s "$block" ] || { warn "could not write the hook block; skipping the update hook"; return 0; }
-	awk -v anchor="$anchor" -v block="$block" '
-		{ print }
-		$0 == anchor && !done {
+
+	local anchor='chmod +x "$steam_root/steamrtarm64/steam" 2>/dev/null || true'
+	local tmp="$f.luatools-new"
+	# Two splices in one pass, each idempotent. The session-start block sits
+	# BEFORE the early exit (so it runs on every session start even when the
+	# client is already installed): it is already there when the line before
+	# the early exit is our MARK_END. The reinstall block sits after the client
+	# chmod: already there when the line after it is our MARK_BEGIN. At least
+	# one anchor must match exactly; a near-miss would splice the block in the
+	# wrong place.
+	local prev next already_early already_anchor
+	prev=$(awk -v early="$EARLY_EXIT" '
+		$0 == early { print save; exit }
+		{ save = $0 }
+	' "$f")
+	case $prev in
+		"$MARK_END") already_early=1 ;;
+		*) already_early=0 ;;
+	esac
+	next=$(awk -v anchor="$anchor" '
+		found && !printed { print; printed = 1; exit }
+		$0 == anchor { found = 1; save = $0 }
+	' "$f")
+	case $next in
+		"$MARK_BEGIN"*) already_anchor=1 ;;
+		*) already_anchor=0 ;;
+	esac
+	awk -v anchor="$anchor" -v early="$EARLY_EXIT" -v block="$block" \
+		-v want_early=$((1 - already_early)) -v want_anchor=$((1 - already_anchor)) '
+		$0 == early && want_early {
 			while ((getline line < block) > 0) print line
-			close(block); done = 1
+			close(block); done_early = 1
 		}
-		END { exit done ? 0 : 1 }
-	' "$f" > "$f.luatools-new" || { rm -f "$f.luatools-new"; warn "could not hook $f"; return 0; }
+		{ print }
+		$0 == anchor && want_anchor {
+			while ((getline line < block) > 0) print line
+			close(block); done_anchor = 1
+		}
+		END { exit (done_early || done_anchor || !want_early || !want_anchor) ? 0 : 1 }
+	' "$f" > "$tmp" || { rm -f "$tmp"; warn "could not hook $f (anchors not found)"; return 0; }
+
+	# Anything after this point only runs when the file changed.
+	if cmp -s "$f" "$tmp" 2>/dev/null; then
+		rm -f "$tmp"
+		ok "droiddeck-steam-install already hooked"
+		refresh_staged_manifest
+		return 0
+	fi
 	# Keep the original mode (a session bootstrap must stay executable) and swap
 	# atomically: an interrupted rewrite must never leave a truncated script.
-	chmod --reference="$f" "$f.luatools-new" 2>/dev/null || chmod 0755 "$f.luatools-new"
-	if mv -f "$f.luatools-new" "$f"; then
-		ok "droiddeck-steam-install re-applies the wrapper after client updates"
+	chmod --reference="$f" "$tmp" 2>/dev/null || chmod 0755 "$tmp"
+	if mv -f "$tmp" "$f"; then
+		ok "droiddeck-steam-install re-applies the wrapper at session start and after client updates"
+		refresh_staged_manifest
 	else
-		rm -f "$f.luatools-new"
+		rm -f "$tmp"
 		warn "could not hook $f"
-		return 0
 	fi
 }
 
@@ -760,6 +868,7 @@ uninstall_steam_install_hook() {
 	chmod --reference="$f" "$f.luatools-new" 2>/dev/null || chmod 0755 "$f.luatools-new"
 	if mv -f "$f.luatools-new" "$f"; then
 		ok "droiddeck-steam-install hook removed"
+		refresh_staged_manifest
 	else
 		rm -f "$f.luatools-new"
 	fi
@@ -885,6 +994,7 @@ main() {
 	install_plugin
 	migrate_legacy_data
 	install_launcher_wrapper
+	fix_ownership
 	install_installer_copy
 
 	echo
