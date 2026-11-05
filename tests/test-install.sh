@@ -116,9 +116,10 @@ SH
 chmod +x "$tmp/bin/droiddeck-steam-install"
 # A .droiddeck-staged fixture so refresh_staged_manifest has something to edit.
 # On the device the manifest lives at /usr/local/.droiddeck-staged and its keys
-# are relative to /usr/local ("usr/local/bin/droiddeck-steam-install"). The
-# tests mount the same layout under $tmp via DROIDDECK_STAGED_PREFIX, with the
-# key "bin/droiddeck-steam-install".
+# are in-guest paths without the leading slash. The manifest rewrite itself is
+# device-specific (STEAM_INSTALL must live at /usr/local/...); these checks use
+# DROIDDECK_STAGED_PREFIX to point the prefix at $tmp, with the key
+# "bin/droiddeck-steam-install" matching $tmp/bin/droiddeck-steam-install.
 cat > "$tmp/.droiddeck-staged" <<EOF
 /app/base.apk 93514065 1793800264000
 bin/droiddeck-steam-install	9316 1793875642000 true

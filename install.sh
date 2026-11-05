@@ -184,15 +184,16 @@ fetch_verified() {
 # Running as real root (adb + su inside the DroidDeck LinuxFS) would leave the
 # payload owned by root while the Steam client runs as the Android app's uid,
 # which cannot even open Lumen's log. Everything the client touches must carry
-# the same ownership as $HOME, which the app created as its own uid.
+# the same ownership as $HOME, which the app created as its own uid — so when
+# $HOME is NOT root-owned and we are root, adopt that owner.
 fix_ownership() {
 	[ "$(id -u)" = "0" ] || return 0
 	local owner
 	owner=$(stat -c '%u:%g' "$HOME" 2>/dev/null) || return 0
-	[ "$owner" = "0:0" ] || return 0
+	[ "$owner" = "0:0" ] && return 0
 	local dir
 	for dir in "$SLS_DIR" "$LUMEN_DIR" "$CONFIG_DIR"; do
-		[ -e "$dir" ] && chown -R --reference="$HOME" "$dir" 2>/dev/null
+		[ -e "$dir" ] && chown -R "$owner" "$dir" 2>/dev/null
 	done
 	return 0
 }
@@ -728,12 +729,11 @@ install_launcher_wrapper() {
 refresh_staged_manifest() {
 	local f="$STEAM_INSTALL"
 	[ -f "$STAGED_MANIFEST" ] && [ -f "$f" ] || return 0
-	# Manifest keys are relative to /usr/local (e.g.
-	# "usr/local/bin/droiddeck-steam-install"); the real STEAM_INSTALL lives at
-	# /usr/local/bin/droiddeck-steam-install. DROIDDECK_STAGED_PREFIX lets the
-	# tests mount the same layout elsewhere; anything else outside /usr/local
+	# Manifest keys are in-guest paths without the leading slash, e.g.
+	# "usr/local/bin/droiddeck-steam-install". DROIDDECK_STAGED_PREFIX lets the
+	# tests mount the same layout elsewhere; anything else outside the prefix
 	# has no manifest entry to refresh.
-	local key prefix="${DROIDDECK_STAGED_PREFIX:-/usr/local}"
+	local key prefix="${DROIDDECK_STAGED_PREFIX:-/}"
 	case $f in
 		"$prefix"/*) key="${f#"$prefix"/}" ;;
 		*) return 0 ;;
