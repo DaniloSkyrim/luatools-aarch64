@@ -390,11 +390,19 @@ check "missing legacy file migrated" test -f "$PLUGIN_DIR/backend/data/donated.j
 check "existing setting not overwritten" \
 	grep -q 'pt-BR' "$PLUGIN_DIR/backend/data/settings.json"
 
-# 7zz fallback: with no network and no p7zip, the installer warns and continues.
+# 7zz fallback: the download fails, so bin/7zz may only be the p7zip shim the
+# installer writes when the host already has /usr/bin/7z. It must never be a
+# leftover or half-written binary from the failed download.
 mkdir -p "$tmp/sevenzip"
 SEVENZIP_URL="file://$tmp/does-not-exist.tar.xz"
 check "missing 7zz download does not abort the install" install_sevenzip "$tmp/sevenzip"
-check "no bogus 7zz installed" test ! -e "$tmp/sevenzip/bin/7zz"
+if [ -x /usr/bin/7z ]; then
+	check "failed 7zz download falls back to the p7zip shim" \
+		grep -qF 'exec /usr/bin/7z "$@"' "$tmp/sevenzip/bin/7zz"
+else
+	check "failed 7zz download installs no 7zz without p7zip" \
+		test ! -e "$tmp/sevenzip/bin/7zz"
+fi
 
 # 7zz happy path: the official tarball ships 7zz at its root, and the installer
 # must land it as <backend>/bin/7zz (not <backend>/bin/bin/7zz or a missing file).
