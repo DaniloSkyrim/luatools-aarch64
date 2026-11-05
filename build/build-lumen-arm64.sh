@@ -61,12 +61,14 @@ d = open("bin/lumen", "rb").read()
 if d[:4] != b"\x7fELF":
     sys.exit("bin/lumen is not ELF")
 cls, machine = d[4], struct.unpack_from("<H", d, 18)[0]
-etype = struct.unpack_from("<H", d, 16)[0]
-print(f"   class={cls} machine={hex(machine)} type={hex(etype)} size={len(d)}")
+etype, entry = struct.unpack_from("<H", d, 16)[0], struct.unpack_from("<Q", d, 24)[0]
+print(f"   class={cls} machine={hex(machine)} type={hex(etype)} entry={hex(entry)} size={len(d)}")
 if cls != 2 or machine != 0xB7:
     sys.exit("bin/lumen is not an ELF64 aarch64 binary")
-if etype != 2:
-    sys.exit("bin/lumen is not an executable")
+# Ubuntu builds PIE by default, so an executable is ET_EXEC (2) or ET_DYN (3)
+# with a non-zero entry point; a shared object has no entry point.
+if etype not in (2, 3) or entry == 0:
+    sys.exit(f"bin/lumen is not an executable (type={etype} entry={entry})")
 PY
 
 if [ "${PATCH_LUA:-1}" = 1 ]; then
