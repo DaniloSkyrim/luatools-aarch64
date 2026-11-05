@@ -759,6 +759,9 @@ refresh_staged_manifest() {
 		{ print }
 		END { exit done ? 0 : 1 }
 	' "$STAGED_MANIFEST" > "$tmp" || { rm -f "$tmp"; return 0; }
+	# The app owns this manifest; keep its ownership when we are root.
+	chown --reference="$STAGED_MANIFEST" "$tmp" 2>/dev/null || true
+	chmod --reference="$STAGED_MANIFEST" "$tmp" 2>/dev/null || true
 	if mv -f "$tmp" "$STAGED_MANIFEST"; then
 		ok "droiddeck-staged updated; the hook survives DroidDeck's re-extraction"
 	else
@@ -854,6 +857,10 @@ EOF
 	fi
 	# Keep the original mode (a session bootstrap must stay executable) and swap
 	# atomically: an interrupted rewrite must never leave a truncated script.
+	# The session runs as the app's uid, so the hook must keep that owner too —
+	# when we are root the new file would be root-owned and the session could
+	# not even execute it.
+	chown --reference="$f" "$tmp" 2>/dev/null || true
 	chmod --reference="$f" "$tmp" 2>/dev/null || chmod 0755 "$tmp"
 	if mv -f "$tmp" "$f"; then
 		ok "droiddeck-steam-install re-applies the wrapper at session start and after client updates"
@@ -874,6 +881,7 @@ uninstall_steam_install_hook() {
 		{ print }
 	' "$f" > "$f.luatools-new" || { rm -f "$f.luatools-new"; return 0; }
 	# Keep the original mode (the script must stay executable) and swap atomically.
+	chown --reference="$f" "$f.luatools-new" 2>/dev/null || true
 	chmod --reference="$f" "$f.luatools-new" 2>/dev/null || chmod 0755 "$f.luatools-new"
 	if mv -f "$f.luatools-new" "$f"; then
 		ok "droiddeck-steam-install hook removed"
