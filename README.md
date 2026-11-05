@@ -2,58 +2,21 @@
 
 # luatools-aarch64
 
-Instalador do **LuaTools + SLSsteam + Lumen** para o ambiente de desktop do
-[DroidDeck](https://github.com/Droid-Deck/DroidDeck) em ARM64.
+Instalador do **LuaTools + SLSsteam + Lumen** para o cliente Steam **aarch64
+nativo** do [DroidDeck](https://github.com/Droid-Deck/DroidDeck).
 
-O DroidDeck roda o cliente Steam **x86-64** (`steamrt64/steam`) sob FEX quando
-o modo x86-64 está ativado. Este projeto usa esse modo: o SLSsteam é o build
-x86-64 da branch upstream `AceSLS/SLSsteam@dev-X86_64`, o Lumen é recompilado
-para aarch64 (ele só conversa com a Steam por CDP/RPC em loopback) e o plugin
-LuaTools é arch-neutral.
+O DroidDeck traz um cliente Steam ARM64 próprio em
+`~/.local/share/Steam/steamrtarm64/`. É esse cliente que este projeto usa —
+tanto no desktop quanto ao apertar *play* direto no DroidDeck (Gamescope). O
+cliente x86-64 emulado por FEX **não** é usado nem alterado.
 
 ## Pré-requisitos
 
-1. DroidDeck com o **cliente Steam x86-64 ativado**.
-2. A Steam x86-64 aberta pelo menos uma vez (o DroidDeck baixa `steamrt64`,
-   o FEX e o rootfs Ubuntu 24.04 nessa primeira execução).
-3. O instalador roda dentro do desktop Linux do DroidDeck (host aarch64; as
-   imagens atuais são **Ubuntu 26.04**, as antigas eram Arch Linux ARM — ele usa
-   `apt-get` ou `pacman`, o que existir).
+1. DroidDeck com o cliente ARM64 já baixado: abra a Steam uma vez pelo ícone
+   normal e deixe `~/.local/share/Steam/steamrtarm64/steamclient.so` aparecer.
+2. Terminal dentro do desktop Linux do DroidDeck (host aarch64).
 
-## Estado verificado (2026-11-04)
-
-Já verificado neste repositório:
-
-- O CI compilou e publicou os dois assets do release `slsteam-x86_64`:
-  `slsteam-x86_64.zip` (`SLSsteam.so` ELF64 x86-64, 25 MB) e
-  `cloudredirect-x86_64.zip` (`.so` + CLI, ambos ELF64 x86-64).
-- Os **17/17** padrões da branch `dev-X86_64` casam de forma única no
-  `steamrt64/steamclient.so` atual (build-id `1a5890ef…`), verificado no CI
-  contra o cliente vivo (`ambiguous=0 missing=0`).
-- O bloco de injeção foi aplicado ao `droiddeck-steam-x64` **real** e o script
-  resultante passa em `bash -n`; o patch é idempotente e reversível.
-- O instalador passa nos testes offline (`bash tests/test-install.sh`),
-  incluindo os patches do Lumen, a preservação de dados do plugin e o wrapper
-  do CLI do CloudRedirect.
-
-Ainda depende de execução real:
-
-- A validação em um dispositivo DroidDeck (injeção no guest FEX, Lumen/CEF e o
-  hook do CloudRedirect no cliente emulado).
-
-## Publicação única (build do SLSsteam x86-64)
-
-Não existe binário x86-64 pronto: os releases oficiais do SLSsteam são i386.
-O workflow `.github/workflows/build-slsteam-x86_64.yml` compila a branch
-`dev-X86_64` em `ubuntu-22.04` e publica o asset estável:
-
-```
-https://github.com/DaniloSkyrim/luatools-aarch64/releases/download/slsteam-x86_64/slsteam-x86_64.zip
-```
-
-Antes de publicar, ajuste `REPO_SLUG` no topo de `install.sh` (ou passe
-`LUA_TOOLS_REPO=owner/repo`). Depois, rode o workflow uma vez em **Actions →
-build-slsteam-x86_64 → Run workflow**.
+O instalador não instala nada fora de `$HOME` (DroidDeck LinuxFS).
 
 ## Instalação
 
@@ -61,75 +24,143 @@ build-slsteam-x86_64 → Run workflow**.
 curl -fsSL https://raw.githubusercontent.com/DaniloSkyrim/luatools-aarch64/main/install.sh | bash
 ```
 
-Opções:
+Depois disso, abra a Steam pelo ícone normal do DroidDeck. Nada mais é
+necessário: o wrapper injeta o SLSsteam, inicia o Lumen e mantém tudo isso
+depois de atualizações do cliente Steam.
 
 ```bash
-bash install.sh --build       # compila o SLSsteam no próprio dispositivo (lento)
-bash install.sh --uninstall   # remove SLSsteam, Lumen e o patch
+bash install.sh --uninstall   # restaura o launcher e remove SLSsteam/Lumen
 bash install.sh --help
 ```
+
+Reinstalar é seguro e idempotente: `backend/data` (configurações, APIs, lista de
+appids) e `backend/api.json` são preservados.
+
+## Como funciona
+
+O instalador troca o launcher do cliente por um wrapper:
+
+```
+steamrtarm64/steam        -> script (wrapper do SLSsteam)
+steamrtarm64/steam.real   -> cliente aarch64 original, intacto
+```
+
+O wrapper, a cada abertura da Steam:
+
+1. limpa qualquer `LD_AUDIT` herdado e exporta `LD_AUDIT=<SLSsteam.so>`;
+2. garante o flag `.cef-enable-remote-debugging` na raiz da Steam (é o caminho
+   que o `droiddeck-session` checa antes de mexer no port do DevTools);
+3. inicia o Lumen com o ambiente limpo de injeção;
+4. publica o contrato `cef_port` (porta + `owner <pid> <starttime>`) que o
+   Lumen lê para anexar ao CEF do cliente;
+5. adiciona `-noverifyfiles` e executa `steam.real`.
+
+Como o wrapper é um script, o self-check do cliente tentaria baixar a Steam de
+novo e sairia com código 42 — daí o `-noverifyfiles` sempre presente.
+
+Um **hook idempotente** em `/usr/local/bin/droiddeck-steam-install` reaplica o
+wrapper depois de cada atualização do cliente (o DroidDeck roda esse script no
+início da sessão e após updates). Não há systemd no guest; o hook é o
+mecanismo de persistência.
 
 ## O que é instalado
 
 | Componente | Destino | Arch |
 |---|---|---|
-| SLSsteam | `~/.droiddeck-x64/.local/share/SLSsteam` | x86-64 (FEX guest) |
-| Lumen | `~/.droiddeck-x64/.local/share/Lumen` | aarch64 nativo |
-| Plugin LuaTools | `~/.droiddeck-x64/.local/share/Lumen/luatools` | texto |
+| SLSsteam | `~/.local/share/SLSsteam` | aarch64 |
+| Lumen | `~/.local/share/Lumen` | aarch64 |
+| Plugin LuaTools | `~/.local/share/Lumen/luatools` | texto |
 | 7zz do backend | `.../luatools/backend/bin/7zz` | aarch64 |
-| CloudRedirect | `.../.local/share/CloudRedirect` | x86-64 (best-effort) |
+| Wrapper | `.../steamrtarm64/steam` | script |
+| Hook de update | `/usr/local/bin/droiddeck-steam-install` | bloco idempotente |
 
-O instalador aplica um bloco idempotente em `/usr/local/bin/droiddeck-steam-x64`
-que, antes do `exec` final do FEX:
+Configuração do SLSsteam: `~/.config/SLSsteam/config.yaml` (migrada da árvore
+antiga `~/.droiddeck-x64` quando existir).
 
-1. inicia o Lumen nativamente (sem `LD_AUDIT`/`LD_PRELOAD` do guest);
-2. executa `FEX /usr/bin/env LD_AUDIT=.../SLSsteam.so steamrt64/steam`.
+## Por que um port aarch64
 
-O `LD_AUDIT` lista **apenas** o `SLSsteam.so`: o `library-inject.so` do branch
-`dev-X86_64` é um arquivo vazio (helper desativado) e quebraria o loader.
+O SLSsteam upstream não tem suporte a aarch64: o `Makefile` força `-m32`, a
+tabela de assinaturas descreve o cliente i386 e `lib/` só traz arquivos i386.
+Este repositório carrega o port em `patches/slsteam-aarch64.patch`, aplicado
+sobre `AceSLS/SLSsteam@7f59509` (commit pinado), e produz o binário no CI.
 
-O `LD_AUDIT` é passado como argumento do `env` **do guest**: o processo FEX do
-host nunca o vê, então o loader aarch64 não tenta carregar um `.so` x86-64.
+O ponto crítico do port é a assinatura `CUser::UpdateAppOwnershipTicket`: o
+cliente arm64 mudou os últimos bytes, e como `Patterns::init()` zera **todas**
+as addresses quando uma pattern obrigatória falha, uma única assinatura errada
+desliga o plugin inteiro. A correção troca o final `F9 6B 04 A9` por wildcards
+(mesmo comprimento, aplicável in-place).
+
+## Assinaturas verificadas
+
+O CI valida cada pattern contra o `steamclient.so` aarch64 vivo, baixado do CDN
+da Valve por `tools/fetch_steam_aarch64.py`:
+
+```
+unique=14 ambiguous=0 missing=0
+```
+
+## Release
+
+O workflow `.github/workflows/build-slsteam-arm64.yml` roda em
+`ubuntu-24.04-arm` e publica em `releases/tag/slsteam-arm64`:
+
+| Asset | Conteúdo |
+|---|---|
+| `slsteam-arm64.zip` | `SLSsteam.so` (aarch64), `config.yaml`, `version.txt`, `LICENSE` |
+| `lumen-arm64.zip` | `lumen` (aarch64) + `lua/` |
+| `*.sha256` | checksums verificados pelo instalador |
+
+As quatro bibliotecas estáticas (`libmem`, `capstone`+`keystone`+`LLVM`,
+`yaml-cpp`, `protobuf`, `LuaJIT`) são compiladas do zero em runner ARM nativo e
+cacheadas entre execuções — elas **precisam** ser `EM_AARCH64`, e os `.a` i386
+que acompanham o upstream não servem.
 
 ## Verificação
 
 ```bash
-pgrep -af 'SLSsteam|Lumen/lumen'
-pid=$(pgrep -f 'steamrt64/steam' | head -n1)
+pid=$(pgrep -x steam.real | head -n1)
 grep -m1 SLSsteam /proc/$pid/maps
+tail -n 20 ~/.SLSsteam.log
+
+pgrep -af 'Lumen/lumen'
+tail -n 50 ~/.local/share/Lumen/lumen.log
 ```
 
-Log do Lumen: `~/.droiddeck-x64/.lumen.log`.
+O log do SLSsteam deve conter `SLSsteam (arm64 -> arm64) loading in steam` e
+`Loaded successfully`.
 
 Para desativar a injeção numa sessão: `SLS_DISABLE=1 steam`.
 
-## Limitações desta versão
+## Limitações
 
-- **CloudRedirect compila, mas o hook não foi executado num cliente emulado.**
-  O build x86-64 é publicado pelo CI (o hook resolve a vtable por RTTI e a
-  árvore tem branches `__x86_64__`); se ele falhar em runtime, o instalador não
-  quebra nada e a aba de cloud saves fica desativada, mas o restante do
-  LuaTools segue funcionando.
-- A branch `dev-X86_64` é o SLSsteam upstream, não o fork `slsteam-moon`:
-  o catálogo de assinaturas, o contrato de porta CEF e alguns fixes do fork
-  moon não existem nela. O plugin e o Lumen continuam instalados.
-- A Steam roda emulada pelo FEX; o cliente ARM64 nativo do DroidDeck não é
-  alterado e continua utilizável sem o LuaTools.
+- Só o cliente ARM64 nativo é suportado. O modo x86-64 sob FEX continua
+  funcionando sem o LuaTools; se uma instalação antiga tiver deixado o launcher
+  `droiddeck-steam-x64` patchado, o instalador restaura o original (backup em
+  `.luatools-orig`) para não haver dois Lumens competindo.
+- O hash do `steamclient.so` do DroidDeck não está na lista de hashes
+  homologados do SLSsteam, então o log emite um aviso. As 14 assinaturas casam
+  de forma única, então o aviso é inofensivo.
+- `la_activity`/`la_symbind64`/`la_objclose` ausentes no binário: não são
+  fatais (glibc 2.43).
 
 ## Estrutura
 
 ```
-install.sh                       instalador único
-build/build-slsteam-x86_64.sh    build do SLSsteam x86-64 (usado no CI)
-.github/workflows/               build + release do asset x86-64
-docs/INSTALL.md                  detalhes operacionais
-tools/                           ferramentas de análise usadas no port
+install.sh                        instalador único
+patches/slsteam-aarch64.patch     port aarch64 do SLSsteam
+patches/lumen-aarch64.patch       ajustes do Lumen para steam.real
+build/build-slsteam-arm64.sh      build + validação + empacotamento
+build/build-lumen-arm64.sh        build + empacotamento do Lumen
+.github/workflows/                CI no runner ARM64 que publica a release
+tools/check_patterns.py           validador de assinaturas (--arch aarch64|x86)
+tools/fetch_steam_aarch64.py      baixa o steamclient.so arm64 do CDN
+tests/test-install.sh             testes offline do instalador
+docs/INSTALL.md                   detalhes operacionais
 ```
 
 ## Créditos e licenças
 
-- SLSsteam — AceSLS e contribuidores, AGPL-3.0 (baixado e compilado, não
-  vendorizado).
+- SLSsteam — AceSLS e contribuidores, AGPL-3.0 (compilado, não vendorizado).
 - Lumen e LuaTools — swwayps, conforme os repositórios originais.
 - DroidDeck — Droid-Deck, GPL-3.0.
 - 7-Zip — Igor Pavlov, LGPL-2.1 com restrição unRAR.

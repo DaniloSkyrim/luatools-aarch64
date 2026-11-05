@@ -1,0 +1,144 @@
+name: build-slsteam-arm64
+
+# Produces the aarch64 SLSsteam and Lumen binaries the installer downloads for
+# the DroidDeck's **native** ARM64 Steam client (steamrtarm64/), used both on the
+# desktop and in Game Mode.
+#
+# Upstream AceSLS/SLSsteam has no aarch64 support (its Makefile hardcodes -m32,
+# its signature table is the i386 one, lib/ ships i386 archives), so the build
+# applies patches/slsteam-aarch64.patch and compiles the four static
+# dependencies from source for aarch64. Because those archives are ELF machine
+# EM_AARCH64, they cannot be produced on the x86-64 runners; this workflow
+# therefore runs on GitHub's native arm64 runner.
+#
+# Published assets (stable URLs):
+#   https://github.com/DaniloSkyrim/luatools-aarch64/releases/download/slsteam-arm64/slsteam-arm64.zip
+#   https://github.com/DaniloSkyrim/luatools-aarch64/releases/download/slsteam-arm64/lumen-arm64.zip
+#   ... plus their .sha256 sidecars (the installer verifies them).
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'build/build-slsteam-arm64.sh'
+      - 'build/build-lumen-arm64.sh'
+      - 'patches/slsteam-aarch64.patch'
+      - 'patches/lumen-aarch64.patch'
+      - 'tools/check_patterns.py'
+      - 'tools/fetch_steam_aarch64.py'
+      - '.github/workflows/build-slsteam-arm64.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Native aarch64: the static dependency archives must be EM_AARCH64, and the
+    # libmem/keystone/LLVM build is only exercised natively.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config perl git \
+            libssl-dev libcurl4-openssl-dev \
+            libluajit-5.1-dev liblua5.4-dev \
+            zip unzip python3 file
+
+      # The four static archives take ~25 min to build (libmem bundles keystone,
+      # which vendors LLVM), so keep them between runs. They only depend on
+      # tools/build-libs-arm64.sh, which lives in the patch.
+      - name: Restore the aarch64 static libraries
+        id: libs-cache
+        uses: actions/cache@v4
+        with:
+          path: libs-cache
+          key: slsteam-arm64-libs-v1
+
+      # build-slsteam-arm64.sh clones upstream, applies the patch, uses the
+      # cached archives when all four are present and links SLSsteam.so.
+      - name: Build SLSsteam aarch64
+        run: |
+          chmod +x build/build-slsteam-arm64.sh
+          LIBS_CACHE="$PWD/libs-cache" build/build-slsteam-arm64.sh dist
+
+      - name: Save the static libraries
+        if: steps.libs-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p libs-cache
+          cp .build/src/lib/arm64/*.a libs-cache/
+          ls -l libs-cache
+
+      - name: Verify the artifact is ELF64 aarch64
+        run: |
+          file dist/slsteam-arm64/SLSsteam.so
+          file -b dist/slsteam-arm64/SLSsteam.so | grep -q 'ELF 64-bit'
+          file -b dist/slsteam-arm64/SLSsteam.so | grep -q 'aarch64'
+          unzip -l dist/slsteam-arm64.zip
+
+      - name: Fetch the live Steam aarch64 client
+        run: python3 tools/fetch_steam_aarch64.py /tmp/steam-target
+
+      - name: Verify every arm64 signature against the live client
+        run: |
+          python3 tools/check_patterns.py \
+            .build/src/src/patterns.cpp \
+            /tmp/steam-target/steamrtarm64/steamclient.so \
+            --arch aarch64 | tee /tmp/patterns.txt
+          grep -q 'ambiguous=0 missing=0' /tmp/patterns.txt
+          # The i386 table must not be compiled in: the arm64 build only ever
+          # uses the block under #if SLS_ARCH_ARM64.
+          grep -q 'arch=aarch64' /tmp/patterns.txt
+
+      - name: Build Lumen aarch64
+        run: |
+          chmod +x build/build-lumen-arm64.sh
+          WORK=.build-lumen build/build-lumen-arm64.sh dist
+
+      - name: Verify Lumen
+        run: |
+          file dist/lumen-arm64/lumen
+          file -b dist/lumen-arm64/lumen | grep -q 'ELF 64-bit'
+          file -b dist/lumen-arm64/lumen | grep -q 'aarch64'
+          grep -qF 'steam.real' dist/lumen-arm64/lua/loop.lua
+          grep -qF 'STEAM_COMMS' dist/lumen-arm64/lua/slscheck.lua
+          grep -qF 'steam.real' dist/lumen-arm64/lua/restart_steam.sh
+          unzip -l dist/lumen-arm64.zip | head -n 12
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum slsteam-arm64.zip | sed 's|  .*/|  |' > slsteam-arm64.zip.sha256
+          sha256sum lumen-arm64.zip   | sed 's|  .*/|  |' > lumen-arm64.zip.sha256
+          cat slsteam-arm64.zip.sha256 lumen-arm64.zip.sha256
+
+      - name: Publish the stable release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: slsteam-arm64
+          name: SLSsteam + Lumen (aarch64 / DroidDeck native)
+          body: |
+            Native aarch64 SLSsteam and Lumen for the DroidDeck ARM64 desktop,
+            built against the stock `steamrtarm64/steamclient.so` client (desktop
+            and Game Mode).
+
+            * `slsteam-arm64.zip` — SLSsteam.so (aarch64) with the arm64
+              signature table, plus config.yaml, version.txt and LICENSE.
+            * `lumen-arm64.zip` — Lumen (aarch64) and a `lua/` tree that
+              recognises the client running as `steam.real` behind the launcher
+              wrapper.
+            * `*.sha256` — checksums the installer verifies before installing.
+
+            Install with
+            `curl -fsSL https://raw.githubusercontent.com/DaniloSkyrim/luatools-aarch64/main/install.sh | bash`.
+          files: |
+            dist/slsteam-arm64.zip
+            dist/slsteam-arm64.zip.sha256
+            dist/lumen-arm64.zip
+            dist/lumen-arm64.zip.sha256
+          fail_on_unmatched_files: true
+          make_latest: false

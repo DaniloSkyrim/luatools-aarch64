@@ -1,57 +1,62 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  luatools-aarch64 — LuaTools + SLSsteam + Lumen for DroidDeck (ARM64 host)
+#  luatools-aarch64 — LuaTools + SLSsteam + Lumen for DroidDeck (native ARM64)
 # ============================================================================
 #  Target runtime:
-#    * host:        aarch64 Linux inside the DroidDeck desktop (Ubuntu 26.04
-#                   on current images; Arch Linux ARM on older ones)
-#    * Steam:       DroidDeck's x86-64 client (steamrt64/steam) under FEX
+#    * host:  aarch64 Linux inside the DroidDeck desktop (Ubuntu 26.04 on
+#             current images, Arch Linux ARM on older ones)
+#    * Steam: DroidDeck's **native aarch64** client
+#             ($HOME/.local/share/Steam/steamrtarm64/steam), desktop and
+#             Game Mode alike. The x86-64 client under FEX is not touched.
 #
 #  What this installs:
-#    1. SLSsteam x86-64 (upstream AceSLS/SLSsteam dev-X86_64) into
-#       ~/.droiddeck-x64/.local/share/SLSsteam
-#    2. Lumen aarch64 (built from swwayps/lumen) into
-#       ~/.droiddeck-x64/.local/share/Lumen
+#    1. SLSsteam aarch64 (native port, patched signature table for the current
+#       steamrtarm64/steamclient.so) into ~/.local/share/SLSsteam
+#    2. Lumen aarch64 into ~/.local/share/Lumen
 #    3. The LuaTools plugin (swwayps/luatools-moon) into
-#       ~/.droiddeck-x64/.local/share/Lumen/luatools
-#    4. An aarch64 7zz for the plugin's backend
-#    5. A small, idempotent patch in /usr/local/bin/droiddeck-steam-x64 that
-#       starts Lumen natively and injects SLSsteam into the FEX guest via
-#       `FEX /usr/bin/env LD_AUDIT=... steam` (never into the aarch64 host).
+#       ~/.local/share/Lumen/luatools, preserving backend/data
+#    4. An aarch64 7zz for the plugin backend
+#    5. A launcher wrapper: steamrtarm64/steam -> steam.real, so SLSsteam is
+#       injected through LD_AUDIT and Lumen starts with the client
+#    6. An idempotent hook in droiddeck-steam-install that re-applies the
+#       wrapper after a Steam client update
 #
 #  Usage:
-#    curl -fsSL <this script> | bash
-#    bash install.sh --build          # build SLSsteam on-device if no release
+#    curl -fsSL https://raw.githubusercontent.com/DaniloSkyrim/luatools-aarch64/main/install.sh | bash
 #    bash install.sh --uninstall
 #    bash install.sh --help
 #
-#  The only value you may need to edit before publishing this repository is
-#  REPO_SLUG below (or pass LUA_TOOLS_REPO=owner/repo in the environment).
+#  Everything is written under $HOME inside the DroidDeck LinuxFS. Nothing
+#  outside the DroidDeck data directory is touched.
 # ============================================================================
 set -uo pipefail
 
 REPO_SLUG="${LUA_TOOLS_REPO:-DaniloSkyrim/luatools-aarch64}"
-SLS_RELEASE_URL="${SLS_RELEASE_URL:-https://github.com/$REPO_SLUG/releases/download/slsteam-x86_64/slsteam-x86_64.zip}"
-SLS_SOURCE_URL="${SLS_SOURCE_URL:-https://codeload.github.com/AceSLS/SLSsteam/tar.gz/refs/heads/dev-X86_64}"
-# Pinned to the commit whose lua/proc.lua and lua/about.lua the patches below
-# were written against.
-LUMEN_SOURCE_URL="${LUMEN_SOURCE_URL:-https://codeload.github.com/swwayps/lumen/tar.gz/52475c3ec0bbe2bf0ccdd209d86a40d99a9881fa}"
+SLS_RELEASE_URL="${SLS_RELEASE_URL:-https://github.com/$REPO_SLUG/releases/download/slsteam-arm64/slsteam-arm64.zip}"
+LUMEN_RELEASE_URL="${LUMEN_RELEASE_URL:-https://github.com/$REPO_SLUG/releases/download/slsteam-arm64/lumen-arm64.zip}"
 PLUGIN_ZIP_URL="${PLUGIN_ZIP_URL:-https://github.com/swwayps/luatools-moon/releases/latest/download/luatools-linux.zip}"
-CLOUDREDIRECT_URL="${CLOUDREDIRECT_URL:-https://github.com/$REPO_SLUG/releases/download/slsteam-x86_64/cloudredirect-x86_64.zip}"
 SEVENZIP_URL="${SEVENZIP_URL:-https://github.com/ip7z/7zip/releases/download/26.05/7z2605-linux-arm64.tar.xz}"
+INSTALLER_URL="${INSTALLER_URL:-https://raw.githubusercontent.com/$REPO_SLUG/main/install.sh}"
 
-OPT_BUILD=0
 OPT_UNINSTALL=0
 
-X64_HOME="${BL_X64_HOME:-$HOME/.droiddeck-x64}"
-STEAM_X64="$X64_HOME/.local/share/Steam"
-SHARE="$X64_HOME/.local/share"
+SHARE="$HOME/.local/share"
+STEAM_ROOT="${STEAM_ROOT:-$SHARE/Steam}"
+STEAMRT="$STEAM_ROOT/steamrtarm64"
+STEAM_BIN="$STEAMRT/steam"
+STEAM_REAL="$STEAMRT/steam.real"
 SLS_DIR="$SHARE/SLSsteam"
 LUMEN_DIR="$SHARE/Lumen"
-DROIDDECK_X64="/usr/local/bin/droiddeck-steam-x64"
-FEX_ROOTFS="$X64_HOME/rootfs"
-MARK_BEGIN="# >>> SLSSTEAM-X64-INJECT"
-MARK_END="# <<< SLSSTEAM-X64-INJECT"
+PLUGIN_DIR="$LUMEN_DIR/luatools"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/SLSsteam"
+CONFIG_FILE="$CONFIG_DIR/config.yaml"
+WRAPPER_SRC="$SLS_DIR/steam-wrapper"
+APPLY_WRAP="$SLS_DIR/apply-wrap.sh"
+STEAM_INSTALL="${DROIDDECK_STEAM_INSTALL:-/usr/local/bin/droiddeck-steam-install}"
+STEAM_X64_LAUNCHER="${DROIDDECK_STEAM_X64:-/usr/local/bin/droiddeck-steam-x64}"
+MARK_BEGIN="# >>> LUATOOLS-AARCH64"
+MARK_END="# <<< LUATOOLS-AARCH64"
+LEGACY_HOME="$HOME/.droiddeck-x64"
 
 # ----------------------------------------------------------------------------
 # output
@@ -73,33 +78,79 @@ trap cleanup EXIT
 
 usage() {
 	cat <<'EOF'
-luatools-aarch64 installer for DroidDeck (x86-64 Steam under FEX)
+luatools-aarch64 installer for DroidDeck (native aarch64 Steam client)
 
-  --build        build SLSsteam x86-64 on-device inside DroidDeck's FEX rootfs
-                 when the prebuilt release asset is unavailable
-  --uninstall    remove SLSsteam, Lumen and the installer's patch
+  --uninstall    remove the launcher wrapper, SLSsteam and Lumen
+                 (the LuaTools settings are moved to a backup first)
   --help         this text
 
 Environment:
-  LUA_TOOLS_REPO=owner/repo   repository serving the SLSsteam release
-  SLS_RELEASE_URL=<url>       explicit slsteam-x86_64.zip URL
-  BL_X64_HOME=<dir>           DroidDeck x86-64 home (default ~/.droiddeck-x64)
+  LUA_TOOLS_REPO=owner/repo   repository serving the release assets
+  SLS_RELEASE_URL=<url>       explicit slsteam-arm64.zip URL
+  LUMEN_RELEASE_URL=<url>     explicit lumen-arm64.zip URL
+  PLUGIN_ZIP_URL=<url>        explicit luatools-linux.zip URL
 EOF
 }
 
 parse_args() {
 	for a in "$@"; do
 		case "$a" in
-			--build) OPT_BUILD=1 ;;
 			--uninstall) OPT_UNINSTALL=1 ;;
 			--help|-h) usage; exit 0 ;;
 			# Accepted for compatibility with Lumen's Update All button.
-			--slsteam-channel|--plugin-channel|--lumen-channel) : ;;
-			stable|beta) : ;;
-			--noplugin) : ;;
+			--slsteam-channel|--plugin-channel|--lumen-channel|--nolaunch) : ;;
+			stable|beta|--noplugin) : ;;
 			*) die "unknown option: $a (see --help)" ;;
 		esac
 	done
+}
+
+# ----------------------------------------------------------------------------
+# helpers
+# ----------------------------------------------------------------------------
+# Print the ELF machine of a file as aarch64 / x86-64 / i386, or nothing when
+# the file is not ELF64. Reads the header directly: the LinuxFS images do not
+# always ship file(1), and this is the only thing the installer needs from it.
+elf_arch() {
+	local f="$1" magic machine
+	[ -f "$f" ] || return 1
+	magic=$(od -An -tx1 -N4 "$f" 2>/dev/null | tr -d ' \n') || return 1
+	[ "$magic" = "7f454c46" ] || return 1
+	machine=$(od -An -tx1 -j18 -N2 "$f" 2>/dev/null | tr -d ' \n')
+	case "$machine" in
+		b700) printf 'aarch64' ;;
+		3e00) printf 'x86-64' ;;
+		0300) printf 'i386' ;;
+		*) printf 'unknown' ;;
+	esac
+}
+
+fetch() {
+	local url="$1" out="$2"
+	case "$url" in
+		file://*) cp -f "${url#file://}" "$out" ;;
+		*) curl -fL --retry 3 --connect-timeout 20 --max-time 900 -o "$out" "$url" ;;
+	esac
+}
+
+# Verify a download against an optional "<url>.sha256" sidecar. A missing
+# sidecar is accepted (older/self-hosted mirrors); a mismatch is fatal.
+fetch_verified() {
+	local url="$1" out="$2" sum_url="$1.sha256" sum_file expected actual
+	fetch "$url" "$out" || return 1
+	if fetch "$sum_url" "$out.sha256" 2>/dev/null; then
+		expected=$(awk '{ print $1; exit }' "$out.sha256" 2>/dev/null)
+		rm -f "$out.sha256"
+		if [ -n "$expected" ]; then
+			actual=$(sha256sum "$out" | awk '{ print $1 }')
+			[ "$actual" = "$expected" ] || {
+				warn "checksum mismatch for $(basename "$out")"
+				rm -f "$out"
+				return 1
+			}
+		fi
+	fi
+	return 0
 }
 
 # ----------------------------------------------------------------------------
@@ -109,211 +160,115 @@ detect() {
 	local arch
 	arch="$(uname -m)"
 	[ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ] || \
-		die "this installer targets aarch64 (got $arch). The host must be the ARM64 DroidDeck runtime."
+		die "this installer targets aarch64 (got $arch). Run it inside the DroidDeck desktop."
 
-	[ -x "$DROIDDECK_X64" ] || \
-		die "DroidDeck's x86-64 launcher not found at $DROIDDECK_X64. Run this inside the DroidDeck desktop."
+	[ -n "${HOME:-}" ] && [ -d "$HOME" ] || die "HOME is not set"
 
-	if [ ! -f "$STEAM_X64/steamrt64/steamclient.so" ]; then
-		warn "x86-64 Steam client not found under $STEAM_X64"
-		step "asking DroidDeck to prepare its x86-64 client and FEX rootfs"
-		"$DROIDDECK_X64" --prepare || warn "--prepare failed; continuing"
+	if [ ! -f "$STEAMRT/steamclient.so" ]; then
+		warn "the native aarch64 Steam client is not present yet"
+		if have droiddeck-steam-install; then
+			step "asking DroidDeck to download its aarch64 client"
+			droiddeck-steam-install || warn "droiddeck-steam-install failed; continuing"
+		fi
 	fi
 
-	[ -f "$STEAM_X64/steamrt64/steamclient.so" ] || die \
-"x86-64 Steam is not ready.
+	[ -f "$STEAMRT/steamclient.so" ] || die \
+"the aarch64 Steam client was not found in $STEAMRT.
 
-  1. In the DroidDeck app, enable the x86-64 Steam client
-     (Steam client architecture = x86-64).
-  2. Launch Steam once from the DroidDeck desktop so it downloads steamrt64.
-  3. Run this installer again."
+  1. Open DroidDeck and let it start Steam once (it downloads steamrtarm64).
+  2. Run this installer again inside the DroidDeck desktop."
 
-	[ -f "$FEX_ROOTFS/usr/bin/env" ] || warn \
-"$FEX_ROOTFS/usr/bin/env is missing; the LD_AUDIT injection needs it. Re-run after Steam's first x86-64 launch."
+	[ -f "$STEAM_BIN" ] || [ -f "$STEAM_REAL" ] || die \
+"no Steam launcher in $STEAMRT (expected steam or steam.real)."
 
-	ok "host aarch64, DroidDeck x86-64 launcher and steamrt64 client found"
+	ok "host aarch64, native Steam client found"
 }
 
-# ----------------------------------------------------------------------------
-# dependencies
-# ----------------------------------------------------------------------------
 ensure_deps() {
 	local missing=() p
-	for p in curl tar unzip python3 gcc make pkg-config file; do
+	for p in curl unzip tar od awk; do
 		have "$p" || missing+=("$p")
 	done
-	if [ "${#missing[@]}" -eq 0 ]; then
-		ok "build tools present"
-		return 0
-	fi
-
-	local SUDO=""
-	if [ "$(id -u)" -ne 0 ]; then
-		have sudo || die "missing ${missing[*]} and neither root nor sudo is available"
-		SUDO="sudo"
-	fi
-
-	# DroidDeck's current LinuxFS is Ubuntu (apt); older/other images are Arch
-	# Linux ARM (pacman). Lumen needs a C compiler plus the lua5.4 and libcurl
-	# development files.
-	if have apt-get; then
-		step "installing build dependencies with apt-get: ${missing[*]}"
-		$SUDO apt-get update -qq || warn "apt-get update failed; trying the install anyway"
-		DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y --no-install-recommends \
-			build-essential pkg-config liblua5.4-dev libcurl4-openssl-dev \
-			ca-certificates curl unzip python3 file tar xz-utils zstd >/dev/null || \
-			die "apt-get could not install the build dependencies"
-	elif have pacman; then
-		step "installing build dependencies with pacman: ${missing[*]}"
-		# lua54/curl/openssl are Lumen build deps; base-devel supplies gcc, make, pkgconf.
-		$SUDO pacman -S --needed --noconfirm base-devel lua54 curl openssl unzip python tar xz file >/dev/null || \
-			die "pacman could not install the build dependencies"
-	else
-		die "missing ${missing[*]} and neither apt-get nor pacman is available; install them and re-run"
-	fi
-	have gcc && have make && have pkg-config || die "build tools still missing after the package manager"
-	ok "build dependencies installed"
+	[ "${#missing[@]}" -eq 0 ] || die "missing required tools: ${missing[*]}"
+	have sha256sum || warn "sha256sum is missing; release checksums are not verified"
+	ok "required tools present"
 }
 
 # ----------------------------------------------------------------------------
-# download helper
+# SLSsteam aarch64
 # ----------------------------------------------------------------------------
-fetch() {
-	local url="$1" out="$2"
-	curl -fL --retry 3 --connect-timeout 20 --max-time 600 -o "$out" "$url"
-}
-
-# ----------------------------------------------------------------------------
-# SLSsteam x86-64
-# ----------------------------------------------------------------------------
-install_slsteam_from_zip() {
-	local zip="$1" root="$2"
-	local d
-	d="$(find "$root" -maxdepth 2 -type d -name 'slsteam-x86_64' | head -n1)"
-	[ -n "$d" ] || d="$root"
-	[ -f "$d/bin/SLSsteam.so" ] || return 1
-	file -b "$d/bin/SLSsteam.so" | grep -q 'ELF 64-bit' || {
-		warn "SLSsteam.so in the release is not ELF64: $(file -b "$d/bin/SLSsteam.so")"
-		return 1
-	}
-	mkdir -p "$SLS_DIR/bin" "$SLS_DIR/res"
-	install -m 0755 "$d/bin/SLSsteam.so" "$SLS_DIR/SLSsteam.so"
-	rm -f "$SLS_DIR/library-inject.so"
-	# dev-X86_64 ships library-inject.so as an empty placeholder.
-	if [ -s "$d/bin/library-inject.so" ] && file -b "$d/bin/library-inject.so" | grep -q 'ELF 64-bit'; then
-		install -m 0755 "$d/bin/library-inject.so" "$SLS_DIR/library-inject.so"
-	fi
-	[ -f "$d/res/config.yaml" ] && install -m 0644 "$d/res/config.yaml" "$SLS_DIR/res/config.yaml"
-	ok "SLSsteam x86-64 installed in $SLS_DIR"
-}
-
-build_slsteam_on_device() {
-	local src="$1"
-	[ -x "$FEX_ROOTFS/usr/bin/bash" ] || die \
-		"cannot build on-device: $FEX_ROOTFS/usr/bin/bash is missing (launch x86-64 Steam once first)"
-	local fex="${BL_FEX:-/usr/local/bin/FEX}"
-	[ -x "$fex" ] || die "FEX not found at $fex"
-
-	step "unpacking SLSsteam source into the x86-64 rootfs (on-device build)"
-	rm -rf "$FEX_ROOTFS/tmp/slsteam-build"
-	mkdir -p "$FEX_ROOTFS/tmp/slsteam-build"
-	tar -xzf "$src" -C "$FEX_ROOTFS/tmp/slsteam-build" --strip-components=1 || \
-		die "could not unpack the SLSsteam source"
-
-	step "installing the x86-64 toolchain inside the FEX rootfs (apt, may take a while)"
-	FEX_ROOTFS="$FEX_ROOTFS" "$fex" /usr/bin/env \
-		HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-		DEBIAN_FRONTEND=noninteractive \
-		/usr/bin/bash -c 'apt-get update && apt-get install -y --no-install-recommends \
-			build-essential pkg-config libssl-dev libcurl4-openssl-dev libdbus-1-dev' || \
-		die "apt-get inside the FEX rootfs failed"
-
-	step "compiling SLSsteam x86-64 under FEX (this is slow)"
-	FEX_ROOTFS="$FEX_ROOTFS" "$fex" /usr/bin/env \
-		HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-		/usr/bin/bash -c 'cd /tmp/slsteam-build && make -j"$(nproc)" audit-libs' || \
-		die "SLSsteam build failed"
-
-	local b="$FEX_ROOTFS/tmp/slsteam-build/bin"
-	[ -f "$b/SLSsteam.so" ] || die "build produced no bin/SLSsteam.so"
-	mkdir -p "$SLS_DIR"
-	install -m 0755 "$b/SLSsteam.so" "$SLS_DIR/SLSsteam.so"
-	rm -f "$SLS_DIR/library-inject.so"
-	if [ -s "$b/library-inject.so" ] && file -b "$b/library-inject.so" | grep -q 'ELF 64-bit'; then
-		install -m 0755 "$b/library-inject.so" "$SLS_DIR/library-inject.so"
-	fi
-	[ -f "$FEX_ROOTFS/tmp/slsteam-build/res/config.yaml" ] && \
-		install -D -m 0644 "$FEX_ROOTFS/tmp/slsteam-build/res/config.yaml" "$SLS_DIR/res/config.yaml"
-	rm -rf "$FEX_ROOTFS/tmp/slsteam-build"
-	ok "SLSsteam x86-64 built and installed in $SLS_DIR"
-}
-
 install_slsteam() {
-	TMP="$(mktemp -d)"
-	local zip="$TMP/slsteam-x86_64.zip" root="$TMP/slsteam"
-	step "downloading SLSsteam x86-64"
-	if fetch "$SLS_RELEASE_URL" "$zip" 2>/dev/null; then
-		mkdir -p "$root"
-		unzip -qo "$zip" -d "$root" || die "could not unpack $zip"
-		if install_slsteam_from_zip "$zip" "$root"; then
-			install_slsteam_shims
-			return 0
-		fi
-		warn "the release asset did not contain a usable x86-64 SLSsteam"
-	else
-		warn "no prebuilt SLSsteam at $SLS_RELEASE_URL"
-	fi
+	TMP="${TMP:-$(mktemp -d)}"
+	local zip="$TMP/slsteam-arm64.zip" root="$TMP/slsteam" so
+	step "downloading SLSsteam aarch64"
+	fetch_verified "$SLS_RELEASE_URL" "$zip" || die \
+"no prebuilt SLSsteam aarch64 at $SLS_RELEASE_URL.
 
-	if [ "$OPT_BUILD" -eq 1 ]; then
-		step "downloading SLSsteam source"
-		fetch "$SLS_SOURCE_URL" "$TMP/slsteam-src.tar.gz" || die "could not download the SLSsteam source"
-		build_slsteam_on_device "$TMP/slsteam-src.tar.gz"
-		install_slsteam_shims
-		return 0
-	fi
+  Publish the release asset once (see docs/INSTALL.md) or pass
+  SLS_RELEASE_URL=<url> pointing at slsteam-arm64.zip."
 
-	die "no prebuilt SLSsteam x86-64 available.
+	mkdir -p "$root"
+	unzip -qo "$zip" -d "$root" || die "could not unpack $zip"
+	so="$(find "$root" -maxdepth 3 -type f -name SLSsteam.so | head -n1)"
+	[ -n "$so" ] || die "the release archive has no SLSsteam.so"
+	[ "$(elf_arch "$so")" = "aarch64" ] || die \
+"$so is not an aarch64 ELF ($(elf_arch "$so" 2>/dev/null || echo not-elf)).
 
-  Publish the release once (GitHub Actions workflow
-  .github/workflows/build-slsteam-x86_64.yml), or re-run with --build to
-  compile it on-device inside DroidDeck's FEX rootfs (slow)."
+  The release asset must be the native aarch64 build; the x86-64 one cannot be
+  injected into the native client."
+
+	mkdir -p "$SLS_DIR/res"
+	install -m 0755 "$so" "$SLS_DIR/SLSsteam.so"
+	local cfg
+	cfg="$(find "$root" -maxdepth 3 -type f -name config.yaml | head -n1)"
+	[ -n "$cfg" ] && install -m 0644 "$cfg" "$SLS_DIR/res/config.yaml"
+	# dev builds ship library-inject.so as an empty placeholder; keep it out of
+	# LD_AUDIT when it is not a real library.
+	rm -f "$SLS_DIR/library-inject.so"
+	ok "SLSsteam aarch64 installed in $SLS_DIR"
+
+	seed_config
+	install_slsteam_shims
 }
 
-# The LuaTools backend's restart_steam.sh prefers
-# $HOME/.local/share/SLSsteam/path/steam. Point it at the DroidDeck launcher;
-# the launcher's patched x64_exec does the actual injection. The desktop
-# guardian is not used here (no systemd user units under PRoot), so provide a
-# successful no-op for Lumen's deskcover calls.
+# Lumen and the LuaTools plugin read $HOME/.config/SLSsteam/config.yaml. Seed it
+# from the previously installed x86-64 setup when it exists, so appids, fake
+# ids and tokens survive the move to the native client.
+seed_config() {
+	mkdir -p "$CONFIG_DIR"
+	[ -f "$CONFIG_FILE" ] && return 0
+	local legacy="$LEGACY_HOME/.config/SLSsteam/config.yaml"
+	if [ -f "$legacy" ]; then
+		install -m 0644 "$legacy" "$CONFIG_FILE" && \
+			ok "existing SLSsteam settings migrated to $CONFIG_FILE"
+		return 0
+	fi
+	[ -f "$SLS_DIR/res/config.yaml" ] && \
+		install -m 0644 "$SLS_DIR/res/config.yaml" "$CONFIG_FILE"
+}
+
+# Lumen expects two helpers under ~/.local/share/SLSsteam:
+#   * path/steam — the launcher its Restart Steam button executes. It must be
+#     the wrapper, otherwise a restart would drop the injection.
+#   * ensure-desktop-coverage.sh — called by deskcover; a successful no-op here
+#     because the wrapper covers desktop and Game Mode alike.
 install_slsteam_shims() {
 	mkdir -p "$SLS_DIR/path"
 	cat > "$SLS_DIR/path/steam" <<'EOF'
 #!/bin/sh
-# Lumen runs with HOME=$X64_HOME (see x64_env), but droiddeck-steam-x64 derives
-# its own X64_HOME from HOME. Restore the outer home before calling it, or the
-# relaunch would create a nested ~/.droiddeck-x64 and bootstrap a second client.
-x64="${BL_X64_HOME:-}"
-if [ -z "$x64" ]; then
-	d=$(cd "$(dirname "$0")" && pwd)
-	x64=$(dirname "$(dirname "$(dirname "$(dirname "$d")")")")
-fi
-if [ "$HOME" = "$x64" ]; then
-	HOME=$(dirname "$x64"); export HOME
-fi
-exec /usr/local/bin/droiddeck-steam-x64 --exec "$@"
+# LuaTools aarch64: restart through the wrapped Steam Runtime launcher so
+# SLSsteam and Lumen come back with the client.
+root="${XDG_DATA_HOME:-${HOME:-/root}/.local/share}/Steam"
+for candidate in "$root/steamrtarm64/steam" "$HOME/.steam/steam/steamrtarm64/steam"; do
+	[ -x "$candidate" ] && exec "$candidate" "$@"
+done
+echo "LuaTools: no aarch64 Steam launcher found" >&2
+exit 127
 EOF
 	chmod 0755 "$SLS_DIR/path/steam"
-	cat > "$SLS_DIR/ensure-desktop-coverage.sh" <<'EOF'
-#!/bin/sh
-# Desktop coverage is handled by the droiddeck-steam-x64 injection block.
-exit 0
-EOF
+	printf '#!/bin/sh\n# Desktop coverage is handled by the Steam launcher wrapper.\nexit 0\n' \
+		> "$SLS_DIR/ensure-desktop-coverage.sh"
 	chmod 0755 "$SLS_DIR/ensure-desktop-coverage.sh"
-	# Seed the runtime config so the LuaTools settings tab has a file to read
-	# before the first injected Steam launch.
-	if [ -f "$SLS_DIR/res/config.yaml" ] && [ ! -f "$X64_HOME/.config/SLSsteam/config.yaml" ]; then
-		mkdir -p "$X64_HOME/.config/SLSsteam"
-		install -m 0644 "$SLS_DIR/res/config.yaml" "$X64_HOME/.config/SLSsteam/config.yaml"
-	fi
 	ok "SLSsteam launcher shims installed"
 }
 
@@ -322,126 +277,78 @@ EOF
 # ----------------------------------------------------------------------------
 install_lumen() {
 	TMP="${TMP:-$(mktemp -d)}"
-	local src="$TMP/lumen-src"
-	step "downloading Lumen source"
-	fetch "$LUMEN_SOURCE_URL" "$TMP/lumen.tar.gz" || die "could not download Lumen"
-	mkdir -p "$src"
-	tar -xzf "$TMP/lumen.tar.gz" -C "$src" --strip-components=1 || die "could not unpack Lumen"
+	local zip="$TMP/lumen-arm64.zip" root="$TMP/lumen" bin
+	step "downloading Lumen aarch64"
+	fetch_verified "$LUMEN_RELEASE_URL" "$zip" || die \
+"no prebuilt Lumen aarch64 at $LUMEN_RELEASE_URL.
 
-	step "building Lumen for aarch64"
-	( cd "$src" && make -j"$(nproc)" ) || die "Lumen build failed"
-	[ -x "$src/bin/lumen" ] || die "Lumen build produced no bin/lumen"
-	file -b "$src/bin/lumen" | grep -q 'ELF 64-bit.*aarch64' || die "Lumen is not ELF64 aarch64"
+  Publish the release asset once (see docs/INSTALL.md) or pass
+  LUMEN_RELEASE_URL=<url> pointing at lumen-arm64.zip."
+
+	mkdir -p "$root"
+	unzip -qo "$zip" -d "$root" || die "could not unpack $zip"
+	bin="$(find "$root" -maxdepth 2 -type f -name lumen | head -n1)"
+	[ -n "$bin" ] || die "the Lumen archive has no lumen binary"
+	[ "$(elf_arch "$bin")" = "aarch64" ] || die \
+"Lumen in the release is not an aarch64 ELF ($(elf_arch "$bin" 2>/dev/null || echo not-elf))"
 
 	mkdir -p "$LUMEN_DIR"
-	install -m 0755 "$src/bin/lumen" "$LUMEN_DIR/lumen"
+	install -m 0755 "$bin" "$LUMEN_DIR/lumen"
+	local lua_src
+	lua_src="$(dirname "$bin")/lua"
+	[ -d "$lua_src" ] || die "the Lumen archive has no lua/ tree"
 	rm -rf "$LUMEN_DIR/lua"
-	cp -r "$src/lua" "$LUMEN_DIR/lua"
-	patch_lumen_proc "$LUMEN_DIR/lua/proc.lua" || \
-		warn "Lumen will not recognise the FEX Steam process; the LuaTools UI may detach"
-	patch_lumen_restart "$LUMEN_DIR/lua/restart_steam.sh" || \
-		warn "Lumen's Restart Steam cannot see the FEX client; restart it from the desktop"
-	patch_lumen_about "$LUMEN_DIR/lua/about.lua" || \
-		warn "Lumen's Update All still points at the i386 moon stack; do not use it"
+	cp -r "$lua_src" "$LUMEN_DIR/lua"
+
+	patch_lumen_bundle
 	ok "Lumen installed in $LUMEN_DIR"
 }
 
-# Lumen's Update All button re-runs the upstream luatools-moon installer, which
-# would replace this x86-64 setup with the i386 moon stack. Point it at this
-# repository's installer instead; the installer is idempotent.
-patch_lumen_about() {
+# The published asset is already patched for the native client. These edits are
+# idempotent fallbacks for a vanilla Lumen build: Update All must re-run this
+# installer (not the upstream 32-bit one), and the helpers must recognise the
+# client running as steam.real behind the wrapper.
+patch_lumen_bundle() {
+	local about="$LUMEN_DIR/lua/about.lua"
+	local loop="$LUMEN_DIR/lua/loop.lua"
+	local proc="$LUMEN_DIR/lua/proc.lua"
+	local slscheck="$LUMEN_DIR/lua/slscheck.lua"
+	local restart="$LUMEN_DIR/lua/restart_steam.sh"
+
+	if [ -f "$about" ] && ! grep -q 'LUA_TOOLS-AARCH64-INSTALLER' "$about"; then
+		replace_installer_url "$about"
+	fi
+	# The liveness probe lives in loop.lua (proc.lua is the generic scanner), so
+	# either file knowing steam.real is enough.
+	if [ -f "$loop" ] || [ -f "$proc" ]; then
+		if ! grep -qs 'steam\.real' "$loop" "$proc"; then
+			warn "Lumen does not know steam.real; the UI may detach after a restart"
+		fi
+	fi
+	if [ -f "$slscheck" ] && ! grep -q 'STEAM_COMMS' "$slscheck"; then
+		warn "Lumen slscheck.lua does not list steam.real; SLSsteam detection may report a miss"
+	fi
+	if [ -f "$restart" ] && ! grep -qF 'steam.real' "$restart"; then
+		warn "Lumen restart_steam.sh only matches 'steam'; Restart Steam may refuse to run"
+	fi
+}
+
+# Point Lumen's Update All at the installer copy kept inside the Lumen dir, so
+# it re-applies this stack instead of the upstream i386 one.
+replace_installer_url() {
 	local f="$1"
-	[ -f "$f" ] || { warn "Lumen about.lua not found; skipping update URL patch"; return 0; }
-	grep -q 'SLSSTEAM-AARCH64-UPDATE-URL' "$f" && return 0
-	python3 - "$f" "$REPO_SLUG" <<'PY' || { warn "could not patch Lumen about.lua"; return 1; }
-import sys
-path, repo = sys.argv[1], sys.argv[2]
-src = open(path, encoding="utf-8").read()
-old = "https://raw.githubusercontent.com/swwayps/luatools-moon/main/install.sh"
-new = "https://raw.githubusercontent.com/%s/main/install.sh" % repo
-if old not in src:
-    raise SystemExit("upstream install URL not found")
-src = src.replace(old, new, 1)
-src = src.replace("about.INSTALL_URL =",
-                  "-- SLSSTEAM-AARCH64-UPDATE-URL\nabout.INSTALL_URL =", 1)
-open(path, "w", encoding="utf-8").write(src)
-PY
-	ok "Lumen Update All points at this repository"
-}
-
-# DroidDeck runs the x86-64 Steam client under FEX, so /proc/<pid>/comm is
-# FEX/FEXInterpreter, not "steam". Lumen's liveness and SLSsteam-detection
-# checks match comm exactly; teach them to recognise the FEX guest by cmdline.
-patch_lumen_proc() {
-	local f="$1"
-	[ -f "$f" ] || { warn "Lumen proc.lua not found; skipping FEX match patch"; return 0; }
-	grep -q 'SLSSTEAM-FEX-MATCH' "$f" && return 0
-	python3 - "$f" <<'PY' || { warn "could not patch Lumen proc.lua for FEX"; return 1; }
-import sys
-path = sys.argv[1]
-src = open(path, encoding="utf-8").read()
-helper = '''-- SLSSTEAM-FEX-MATCH: the x86-64 Steam client (and its helpers) run under
--- FEX, so /proc/<pid>/comm is FEX/FEXInterpreter rather than "steam". Match the
--- guest command line instead: the emulated binary is an argument ending in
--- "/<comm>" (NUL-separated argv), which does not confuse steam with
--- steamwebhelper.
-local function sls_match(comm, name, root, entry)
-  if name == comm then return true end
-  if type(name) ~= "string" or not name:match("^FEX") then return false end
-  local fh = io.open(root .. "/" .. entry .. "/cmdline", "rb")
-  if not fh then return false end
-  local line = fh:read("*a")
-  fh:close()
-  if not line then return false end
-  local arg = "/" .. comm
-  return line:find(arg .. "\\0", 1, true) ~= nil or line:sub(-#arg) == arg
-end
-'''
-src = src.replace("local proc = {}\n", "local proc = {}\n\n" + helper, 1)
-src = src.replace("if name == comm then found = true; break end",
-                  "if sls_match(comm, name, root, entry) then found = true; break end", 1)
-src = src.replace("        if name == comm then\n",
-                  "        if sls_match(comm, name, root, entry) then\n", 1)
-open(path, "w", encoding="utf-8").write(src)
-PY
-	ok "Lumen proc.lua taught to recognise the FEX Steam process"
-}
-
-# Lumen's Restart Steam helper uses `pgrep -x steam` / `pkill -x steam`, which
-# never match a FEX guest. Without this it reports the client as already gone
-# and refuses to relaunch.
-patch_lumen_restart() {
-	local f="$1"
-	[ -f "$f" ] || { warn "Lumen restart_steam.sh not found; skipping FEX match patch"; return 0; }
-	grep -q 'SLSSTEAM-FEX-MATCH' "$f" && return 0
-	python3 - "$f" <<'PY' || { warn "could not patch Lumen restart_steam.sh for FEX"; return 1; }
-import sys
-path = sys.argv[1]
-src = open(path, encoding="utf-8").read()
-
-anchor = 'CHECK_ONLY="${1:-}"\n'
-if anchor not in src:
-    raise SystemExit("CHECK_ONLY anchor not found")
-
-src = src.replace("pgrep -x steam >/dev/null 2>&1", "sls_steam_alive")
-src = src.replace("pkill -TERM -x steam >/dev/null 2>&1 || true", "sls_signal_steam TERM")
-src = src.replace("pkill -KILL -x steam >/dev/null 2>&1 || true", "sls_signal_steam KILL")
-
-helper = '''
-# SLSSTEAM-FEX-MATCH: the x86-64 client runs under FEX, so its comm is
-# FEX/FEXInterpreter rather than "steam". Match the guest cmdline too.
-sls_steam_alive() {
-  pgrep -x steam >/dev/null 2>&1 || pgrep -f 'steamrt64/steam( |$)' >/dev/null 2>&1
-}
-sls_signal_steam() {
-  pkill -"$1" -x steam >/dev/null 2>&1 || true
-  pkill -"$1" -f 'steamrt64/steam( |$)' >/dev/null 2>&1 || true
-}
-'''
-src = src.replace(anchor, anchor + helper, 1)
-open(path, "w", encoding="utf-8").write(src)
-PY
-	ok "Lumen restart helper taught to recognise the FEX Steam process"
+	local tmp="$f.luatools-new"
+	awk '
+		/^about\.INSTALL_URL[[:space:]]*=/ {
+			print "-- LUA_TOOLS-AARCH64-INSTALLER: run the local copy of this installer."
+			print "about.INSTALL_URL ="
+			print "  \"file://\" .. (os.getenv(\"HOME\") or \"\") .. \"/.local/share/Lumen/install.sh\""
+			skip = 1
+			next
+		}
+		skip && /^[[:space:]]*"/ { skip = 0; next }
+		{ print }
+	' "$f" > "$tmp" && mv -f "$tmp" "$f"
 }
 
 # ----------------------------------------------------------------------------
@@ -452,11 +359,11 @@ install_sevenzip() {
 	local dest="$1/bin/7zz"
 	local tmpd="$TMP/7z"
 	mkdir -p "$tmpd"
-	if curl -fL --retry 2 -o "$TMP/7z.tar.xz" "$SEVENZIP_URL" 2>/dev/null && \
+	if fetch "$SEVENZIP_URL" "$TMP/7z.tar.xz" 2>/dev/null && \
 		tar -xJf "$TMP/7z.tar.xz" -C "$tmpd" 2>/dev/null; then
 		local z
 		z="$(find "$tmpd" -maxdepth 3 -type f -name 7zz | head -n1)"
-		if [ -n "$z" ] && file -b "$z" | grep -q 'ELF 64-bit.*aarch64'; then
+		if [ -n "$z" ] && [ "$(elf_arch "$z")" = "aarch64" ]; then
 			install -m 0755 "$z" "$dest"
 			ok "aarch64 7zz installed for the plugin backend"
 			return 0
@@ -479,22 +386,23 @@ install_sevenzip() {
 }
 
 install_plugin() {
-	local zip="$TMP/luatools-linux.zip" root="$TMP/plugin"
+	TMP="${TMP:-$(mktemp -d)}"
+	local zip="$TMP/luatools-linux.zip" root="$TMP/plugin" pj srcdir
 	step "downloading the LuaTools plugin"
 	fetch "$PLUGIN_ZIP_URL" "$zip" || die "could not download luatools-linux.zip"
 	mkdir -p "$root"
 	unzip -qo "$zip" -d "$root" || die "could not unpack the LuaTools plugin"
-	local pj
 	pj="$(find "$root" -maxdepth 2 -name plugin.json -type f | head -n1)"
 	[ -n "$pj" ] || die "the plugin archive has no plugin.json"
-	local srcdir; srcdir="$(dirname "$pj")"
-	local dest="$LUMEN_DIR/luatools"
-	# The plugin keeps its settings and donated appid list under
-	# backend/data; a reinstall must not reset them. api.json is the legacy
-	# location of the user's API list and is migrated into data on restore.
+	srcdir="$(dirname "$pj")"
+
+	local dest="$PLUGIN_DIR"
+	# The plugin keeps its settings and donated appid list under backend/data,
+	# and its API credentials in backend/api.json; a reinstall must not reset
+	# either. Both are staged outside the tree that gets replaced.
 	local data_bak=""
+	local api_bak=""
 	if [ -d "$dest/backend/data" ] || [ -f "$dest/backend/api.json" ]; then
-		# Sibling of $dest so the backup survives even if $TMP is cleaned up.
 		data_bak="$LUMEN_DIR/.plugin-data.$$"
 		mkdir -p "$data_bak" || die "could not create the plugin backup directory"
 		if [ -d "$dest/backend/data" ] && \
@@ -502,8 +410,12 @@ install_plugin() {
 			rm -rf "$data_bak"
 			die "could not back up the LuaTools settings; reinstall aborted"
 		fi
-		if [ ! -f "$data_bak/api.json" ] && [ -f "$dest/backend/api.json" ]; then
-			cp -a "$dest/backend/api.json" "$data_bak/api.json" 2>/dev/null || true
+		if [ -f "$dest/backend/api.json" ]; then
+			api_bak="$LUMEN_DIR/.plugin-api.$$"
+			cp -a "$dest/backend/api.json" "$api_bak" 2>/dev/null || {
+				rm -rf "$data_bak" "$api_bak"
+				die "could not back up backend/api.json; reinstall aborted"
+			}
 		fi
 	fi
 
@@ -520,144 +432,290 @@ install_plugin() {
 			warn "could not restore the previous LuaTools settings (kept in $data_bak)"
 		fi
 	fi
+	if [ -n "$api_bak" ]; then
+		mkdir -p "$dest/backend"
+		if cp -a "$api_bak" "$dest/backend/api.json" 2>/dev/null; then
+			rm -f "$api_bak"
+			ok "previous LuaTools credentials restored"
+		else
+			warn "could not restore backend/api.json (kept in $api_bak)"
+		fi
+	fi
 
 	install_sevenzip "$dest/backend"
 	ok "LuaTools plugin installed in $dest"
 }
 
-# CloudRedirect is best-effort: it is only useful if the x86-64 build exists.
-# The hook is injected in the guest via LD_PRELOAD by the launcher patch.
-install_cloudredirect() {
-	local zip="$TMP/cloudredirect-x86_64.zip" root="$TMP/cr"
-	if ! fetch "$CLOUDREDIRECT_URL" "$zip" 2>/dev/null; then
-		warn "CloudRedirect x86-64 not published; cloud saves stay disabled"
-		return 0
+# Move the settings written by the previous x86-64 setup into the native home.
+# Only files that do not exist yet are copied, so a running install is never
+# overwritten.
+migrate_legacy_data() {
+	local old_data="$LEGACY_HOME/.local/share/Lumen/luatools/backend/data"
+	local new_data="$PLUGIN_DIR/backend/data"
+	[ -d "$LEGACY_HOME" ] || return 0
+
+	if [ -d "$old_data" ]; then
+		mkdir -p "$new_data"
+		if cp -an "$old_data/." "$new_data/" 2>/dev/null; then
+			ok "LuaTools settings migrated from $LEGACY_HOME"
+		fi
 	fi
-	mkdir -p "$root"
-	if ! unzip -qo "$zip" -d "$root" 2>/dev/null; then
-		warn "CloudRedirect archive is invalid; cloud saves stay disabled"
-		return 0
+}
+
+# ----------------------------------------------------------------------------
+# Steam launcher wrapper (aarch64)
+# ----------------------------------------------------------------------------
+write_wrapper() {
+	mkdir -p "$SLS_DIR" || die "could not create $SLS_DIR"
+	cat > "$WRAPPER_SRC" <<'WRAPPER'
+#!/bin/bash
+# SLSsteam launcher wrapper (LuaTools aarch64)
+# Re-applied after Steam client updates by droiddeck-steam-install.
+set -u
+
+SLS_SO="__SLSDIR__/SLSsteam.so"
+LUMEN_DIR="__LUMEN_DIR__"
+
+here="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")"
+real="$here/steam.real"
+if [ ! -x "$real" ]; then
+	echo "SLSsteam: $real is missing, refusing to recurse" >&2
+	exit 127
+fi
+
+shutdown=0
+case " $* " in
+	*" -shutdown "*) shutdown=1 ;;
+esac
+
+disabled="${SLS_DISABLE:-}"
+case "$disabled" in
+	''|0|no|false) disabled="" ;;
+esac
+
+# Never let an inherited auditor list survive: this script itself sets the only
+# one the client should see, and an inherited copy would be loaded twice.
+old_ifs="$IFS"; IFS=:
+clean=""
+for a in ${LD_AUDIT:-}; do
+	case "$a" in
+		''|*SLSsteam.so|*library-inject.so) continue ;;
+	esac
+	clean="${clean:+$clean:}$a"
+done
+IFS="$old_ifs"
+if [ -n "$clean" ]; then
+	export LD_AUDIT="$clean"
+else
+	unset LD_AUDIT
+fi
+
+if [ "$shutdown" = 0 ] && [ -z "$disabled" ] && [ -d "$LUMEN_DIR" ]; then
+	# Lumen attaches over Steam's CEF DevTools endpoint. Steam itself opens the
+	# endpoint on port 8080 when this file exists in the Steam ROOT (not in
+	# steamrtarm64); droiddeck-session checks the same path and then leaves the
+	# port alone instead of passing its own -cef-enable-debugging. Create it in
+	# both places: the root is what the launcher and Steam read, the client dir
+	# is harmless and covers a manually launched steam.real.
+	touch "$here/../.cef-enable-remote-debugging" 2>/dev/null
+	touch "$here/.cef-enable-remote-debugging" 2>/dev/null
+	[ -d "$HOME/.steam/steam" ] && touch "$HOME/.steam/steam/.cef-enable-remote-debugging" 2>/dev/null
+
+	if [ -x "$LUMEN_DIR/lumen" ] && ! pgrep -f "$LUMEN_DIR/lumen" >/dev/null 2>&1; then
+		env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH \
+			-u STEAM_RUNTIME -u STEAM_RUNTIME_LIBRARY_PATH \
+			LUMEN_BACKEND_DIR="$LUMEN_DIR/luatools/backend" \
+			LUMEN_LUA_DIR="$LUMEN_DIR/lua" \
+			LUMEN_SINGLETON_LOCK="$LUMEN_DIR/lumen.lock" \
+			setsid "$LUMEN_DIR/lumen" >"$LUMEN_DIR/lumen.log" 2>&1 < /dev/null &
 	fi
-	local so cli
-	so="$(find "$root" -name cloud_redirect.so -type f | head -n1)"
-	cli="$(find "$root" -name cloud_redirect_cli -type f | head -n1)"
-	if [ -z "$so" ] || [ -z "$cli" ] || ! file -b "$so" | grep -q 'ELF 64-bit.*x86-64'; then
-		warn "CloudRedirect is not a usable x86-64 build; cloud saves stay disabled"
-		return 0
+
+	# Publish the DevTools port contract Lumen reads (cefport.lua). The owner
+	# record (pid + start ticks) makes a contract from a previous session
+	# self-invalidating. $$ survives the exec below, so it is the client's pid.
+	port="${BL_CDP_PORT:-8080}"
+	case "$port" in
+		''|*[!0-9]*) port=8080 ;;
+	esac
+	if [ "$port" -ge 1024 ] && [ "$port" -le 65535 ]; then
+		# Field 22 (starttime) of /proc/$$/stat. comm is parenthesised and may
+		# itself contain spaces, so count from the LAST field ending in ")".
+		start="$(awk '{ last = 0; for (i = 1; i <= NF; i++) if (substr($i, length($i), 1) == ")") last = i; if (last) print $(last + 20) }' "/proc/$$/stat" 2>/dev/null)"
+		case "$start" in
+			''|*[!0-9]*) start="" ;;
+		esac
+		if [ -n "$start" ]; then
+			printf '%s\nowner %s %s\n' "$port" "$$" "$start" > "$LUMEN_DIR/cef_port.tmp" 2>/dev/null && \
+				mv -f "$LUMEN_DIR/cef_port.tmp" "$LUMEN_DIR/cef_port" 2>/dev/null
+		else
+			printf '%s\n' "$port" > "$LUMEN_DIR/cef_port" 2>/dev/null
+		fi
 	fi
-	mkdir -p "$SHARE/CloudRedirect"
-	install -m 0755 "$so" "$SHARE/CloudRedirect/cloud_redirect.so"
-	# Lumen runs on the ARM64 host, so it cannot exec the x86-64 CLI directly;
-	# wrap it in FEX using the guest rootfs Steam already uses.
-	install -m 0755 "$cli" "$SHARE/CloudRedirect/cloud_redirect_cli.bin"
-	cat > "$SHARE/CloudRedirect/cloud_redirect_cli" <<'EOF'
-#!/bin/sh
-# x86-64 CLI launched through FEX; the x86-64 home is three levels above
-# this script (.local/share/CloudRedirect), so it works from any shell.
-dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || dir=$(dirname "$0")
-x64=$(dirname "$(dirname "$(dirname "$dir")")")
-exec env FEX_ROOTFS="$x64/rootfs" "${BL_FEX:-/usr/local/bin/FEX}" \
-  "$dir/cloud_redirect_cli.bin" "$@"
+fi
+
+# -shutdown and SLS_DISABLE=1 both mean "no injection this run"; the client has
+# to come up exactly as Valve shipped it.
+if [ "$shutdown" = 0 ] && [ -f "$SLS_SO" ] && [ -z "$disabled" ]; then
+	export LD_AUDIT="$SLS_SO${clean:+:$clean}"
+fi
+
+# Desktop launches omit -noverifyfiles. Steam's self-check then sees this
+# wrapper in place of the launcher, re-downloads the client and exits with 42.
+case " $* " in
+	*" -noverifyfiles "*) ;;
+	*) set -- "$@" -noverifyfiles ;;
+esac
+
+exec "$real" "$@"
+WRAPPER
+	sed -i "s|__SLSDIR__|$SLS_DIR|g; s|__LUMEN_DIR__|$LUMEN_DIR|g" "$WRAPPER_SRC"
+	chmod 0755 "$WRAPPER_SRC" || die "could not chmod the wrapper"
+	ok "Steam launcher wrapper written"
+}
+
+write_apply_wrap() {
+	cat > "$APPLY_WRAP" <<'APPLY'
+#!/bin/bash
+# Put the SLSsteam wrapper in front of the native aarch64 Steam client.
+# Idempotent: an already-wrapped launcher is only refreshed, and a client
+# update (which restores Valve's binary) is wrapped again.
+set -u
+
+STEAM_BIN="__STEAM_BIN__"
+STEAM_REAL="__STEAM_REAL__"
+WRAPPER_SRC="__WRAPPER__"
+
+[ -f "$WRAPPER_SRC" ] || { echo "SLSsteam: missing $WRAPPER_SRC" >&2; exit 0; }
+
+is_wrapper() {
+	[ -f "$1" ] && head -c 200 "$1" 2>/dev/null | grep -q "SLSsteam launcher wrapper"
+}
+
+is_elf() {
+	[ -f "$1" ] && [ "$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')" = "7f454c46" ]
+}
+
+if is_wrapper "$STEAM_BIN"; then
+	# A new installer version may carry a newer wrapper; keep it current.
+	if [ -f "$STEAM_REAL" ]; then
+		chmod 0755 "$STEAM_REAL" 2>/dev/null
+		install -m 0755 "$WRAPPER_SRC" "$STEAM_BIN"
+		exit 0
+	fi
+	echo "SLSsteam: $STEAM_BIN is a wrapper but $STEAM_REAL is missing" >&2
+	exit 1
+fi
+
+if [ -f "$STEAM_BIN" ]; then
+	if ! is_elf "$STEAM_BIN"; then
+		echo "SLSsteam: $STEAM_BIN is neither our wrapper nor an ELF; refusing to replace it" >&2
+		exit 1
+	fi
+	mv -f "$STEAM_BIN" "$STEAM_REAL" || exit 1
+fi
+
+# The client is executable in a normal install; restore the bit anyway, since a
+# copy that lost it would make the wrapper look broken. A filesystem that cannot
+# hold the bit (or a test fixture) only warns: the wrapper reports it at launch.
+[ -f "$STEAM_REAL" ] || { echo "SLSsteam: $STEAM_REAL is missing" >&2; exit 1; }
+chmod 0755 "$STEAM_REAL" 2>/dev/null
+[ -x "$STEAM_REAL" ] || echo "SLSsteam: warning: $STEAM_REAL is not executable" >&2
+install -m 0755 "$WRAPPER_SRC" "$STEAM_BIN" || exit 1
+echo "SLSsteam: wrapper applied to $STEAM_BIN"
+APPLY
+	sed -i "s|__STEAM_BIN__|$STEAM_BIN|g; s|__STEAM_REAL__|$STEAM_REAL|g; s|__WRAPPER__|$WRAPPER_SRC|g" "$APPLY_WRAP"
+	chmod 0755 "$APPLY_WRAP" || die "could not chmod apply-wrap.sh"
+}
+
+install_launcher_wrapper() {
+	write_wrapper
+	write_apply_wrap
+	"$APPLY_WRAP" || die "could not wrap the Steam launcher"
+	[ -f "$STEAM_REAL" ] || die "$STEAM_REAL is missing after apply-wrap"
+	[ "$(elf_arch "$STEAM_REAL")" = "aarch64" ] || die \
+"$STEAM_REAL is not an aarch64 ELF; the native client was not found"
+	ok "Steam launcher wrapped: $STEAM_BIN -> steam.real"
+	install_steam_install_hook
+}
+
+# Hook droiddeck-steam-install right after it restores the launcher. It runs at
+# the start of every session and after every client update, so the wrapper is
+# re-applied without systemd (the DroidDeck guest has no user services).
+install_steam_install_hook() {
+	local f="$STEAM_INSTALL"
+	[ -f "$f" ] || { warn "$f not found; the wrapper is only re-applied by this installer"; return 0; }
+	grep -qF "$MARK_BEGIN" "$f" && { ok "droiddeck-steam-install already hooked"; return 0; }
+	[ -w "$f" ] || { warn "$f is not writable; skipping the update hook"; return 0; }
+
+	local anchor='chmod +x "$steam_root/steamrtarm64/steam" 2>/dev/null || true'
+	grep -qxF "$anchor" "$f" || {
+		warn "could not find the client chmod line in $f; skipping the update hook"
+		return 0
+	}
+
+	local block="$TMP/hook-block"
+	cat > "$block" <<EOF
+$MARK_BEGIN
+# Re-apply the SLSsteam wrapper after the client was (re)installed.
+if [ -x "\$HOME/.local/share/SLSsteam/apply-wrap.sh" ]; then
+  "\$HOME/.local/share/SLSsteam/apply-wrap.sh" || true
+fi
+$MARK_END
 EOF
-	chmod 0755 "$SHARE/CloudRedirect/cloud_redirect_cli"
-	ok "CloudRedirect x86-64 installed in $SHARE/CloudRedirect"
+	awk -v anchor="$anchor" -v block="$block" '
+		{ print }
+		$0 == anchor && !done {
+			while ((getline line < block) > 0) print line
+			close(block); done = 1
+		}
+	' "$f" > "$f.luatools-new" && cat "$f.luatools-new" > "$f" && rm -f "$f.luatools-new" || {
+		warn "could not hook $f"
+		return 0
+	}
+	ok "droiddeck-steam-install re-applies the wrapper after client updates"
 }
 
-# ----------------------------------------------------------------------------
-# /usr/local/bin/droiddeck-steam-x64 patch
-# ----------------------------------------------------------------------------
-patch_droiddeck() {
-	local f="$DROIDDECK_X64" orig="$DROIDDECK_X64.luatools-orig"
-	[ -f "$f" ] || die "$f not found"
-	if grep -qF "$MARK_BEGIN" "$f"; then
-		ok "droiddeck-steam-x64 is already patched"
-		return 0
-	fi
-	[ -w "$f" ] || [ "$(id -u)" -eq 0 ] || die "$f is not writable; re-run as root (DroidDeck's guest user is usually root)"
-
-	step "patching $f (inject SLSsteam into the FEX guest only)"
-	# The file is known-unpatched here, so refresh the backup: a DroidDeck
-	# update may have replaced the launcher since the previous install.
-	cp -p "$f" "$orig"
-
-	SLS_PATCH_FILE="$f" SLS_BEGIN="$MARK_BEGIN" SLS_END="$MARK_END" python3 - <<'PY'
-import os, sys
-
-path = os.environ["SLS_PATCH_FILE"]
-begin = os.environ["SLS_BEGIN"]
-end = os.environ["SLS_END"]
-
-src = open(path, encoding="utf-8", errors="surrogateescape").read()
-if begin in src:
-    print("already patched")
-    sys.exit(0)
-
-needle = 'exec "${BL_FEX:-/usr/local/bin/FEX}" "$STEAM_X64/steamrt64/steam" "$@"'
-if needle not in src:
-    sys.exit("could not find the FEX exec line in droiddeck-steam-x64")
-
-block = f'''{begin}
-  if [ -z "${{SLS_DISABLE:-}}" ]; then
-    # Never let the host (aarch64) loader see the guest's x86-64 audit lib.
-    unset LD_AUDIT
-    SLS_SHARE="${{X64_HOME:-$HOME/.droiddeck-x64}}/.local/share"
-    SLS_AUDIT_LIBS="$SLS_SHARE/SLSsteam/SLSsteam.so"
-    [ -s "$SLS_SHARE/SLSsteam/library-inject.so" ] && \\
-      SLS_AUDIT_LIBS="$SLS_SHARE/SLSsteam/library-inject.so:$SLS_AUDIT_LIBS"
-    if [ -x "$SLS_SHARE/Lumen/lumen" ] && ! pgrep -f "$SLS_SHARE/Lumen/lumen" >/dev/null 2>&1; then
-      touch "$STEAM_X64/.cef-enable-remote-debugging" 2>/dev/null || true
-      env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH -u FEX_ROOTFS \\
-          -u FEX_THUNKCONFIG -u FEX_THUNKHOSTLIBS -u FEX_THUNKGUESTLIBS \\
-          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\
-          BL_X64_HOME="$X64_HOME" \\
-          LUMEN_SINGLETON_LOCK="$SLS_SHARE/Lumen/lumen.lock" \\
-          LUMEN_BACKEND_DIR="$SLS_SHARE/Lumen/luatools/backend" \\
-          LUMEN_LUA_DIR="$SLS_SHARE/Lumen/lua" \\
-          setsid "$SLS_SHARE/Lumen/lumen" >/dev/null 2>&1 < /dev/null &
-    fi
-    SLS_PRELOAD=""
-    [ -f "$SLS_SHARE/CloudRedirect/cloud_redirect.so" ] && \\
-      SLS_PRELOAD="$SLS_SHARE/CloudRedirect/cloud_redirect.so"
-    if [ -f "$SLS_SHARE/SLSsteam/SLSsteam.so" ]; then
-      if [ -n "$SLS_PRELOAD" ]; then
-        exec "${{BL_FEX:-/usr/local/bin/FEX}}" /usr/bin/env LD_PRELOAD="$SLS_PRELOAD" \\
-          LD_AUDIT="$SLS_AUDIT_LIBS" "$STEAM_X64/steamrt64/steam" "$@"
-      fi
-      exec "${{BL_FEX:-/usr/local/bin/FEX}}" /usr/bin/env \\
-        LD_AUDIT="$SLS_AUDIT_LIBS" "$STEAM_X64/steamrt64/steam" "$@"
-    fi
-  fi
-{end}
-{needle}'''
-
-tmp = path + ".luatools-new"
-with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as fh:
-    fh.write(src.replace(needle, block, 1))
-os.replace(tmp, path)
-print("patched")
-PY
-	[ $? -eq 0 ] || die "patching droiddeck-steam-x64 failed"
-	ok "droiddeck-steam-x64 patched"
-}
-
-unpatch_droiddeck() {
-	local f="$DROIDDECK_X64" orig="$DROIDDECK_X64.luatools-orig"
-	if [ -f "$orig" ]; then
-		cp -p "$orig" "$f" && rm -f "$orig"
-		ok "droiddeck-steam-x64 restored from backup"
-		return 0
-	fi
+uninstall_steam_install_hook() {
+	local f="$STEAM_INSTALL"
 	[ -f "$f" ] || return 0
-	python3 - "$f" "$MARK_BEGIN" "$MARK_END" <<'PY' || true
-import re, sys
-path, begin, end = sys.argv[1:4]
-src = open(path, encoding="utf-8", errors="surrogateescape").read()
-src2 = re.sub(re.escape(begin) + r".*?" + re.escape(end) + r"\n", "", src, flags=re.S)
-if src2 != src:
-    open(path, "w", encoding="utf-8", errors="surrogateescape").write(src2)
-    print("removed patch block")
-PY
-	ok "droiddeck-steam-x64 cleaned"
+	grep -qF "$MARK_BEGIN" "$f" || return 0
+	awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
+		index($0, b) == 1 { skip = 1; next }
+		skip { if (index($0, e) == 1) skip = 0; next }
+		{ print }
+	' "$f" > "$f.luatools-new" && cat "$f.luatools-new" > "$f" && rm -f "$f.luatools-new" && \
+		ok "droiddeck-steam-install hook removed"
+}
+
+# The previous x86-64 setup patched droiddeck-steam-x64 to start Lumen and
+# inject the FEX guest. That path is not used by the aarch64 client; restore the
+# original launcher so two Lumens cannot compete.
+cleanup_x86_launcher() {
+	local f="$STEAM_X64_LAUNCHER"
+	local orig="$f.luatools-orig"
+	[ -f "$f" ] || return 0
+	if [ -f "$orig" ]; then
+		cp -p "$orig" "$f" && rm -f "$orig" && ok "x86-64 launcher restored"
+		return 0
+	fi
+	grep -q 'SLSSTEAM-X64-INJECT' "$f" 2>/dev/null || return 0
+	awk '
+		/^# >>> SLSSTEAM-X64-INJECT/ { skip = 1; next }
+		skip { if ($0 ~ /^# <<< SLSSTEAM-X64-INJECT/) skip = 0; next }
+		{ print }
+	' "$f" > "$f.luatools-new" && cat "$f.luatools-new" > "$f" && rm -f "$f.luatools-new" && \
+		ok "x86-64 launcher patch removed"
+}
+
+# Keep a copy of this installer where Lumen's Update All / auto-fix expect it.
+install_installer_copy() {
+	mkdir -p "$LUMEN_DIR"
+	if fetch "$INSTALLER_URL" "$LUMEN_DIR/install.sh" 2>/dev/null; then
+		chmod 0755 "$LUMEN_DIR/install.sh"
+		ok "installer copy kept in $LUMEN_DIR/install.sh"
+	else
+		warn "could not refresh $LUMEN_DIR/install.sh; Lumen's Update All may be stale"
+	fi
 }
 
 # ----------------------------------------------------------------------------
@@ -665,29 +723,29 @@ PY
 # ----------------------------------------------------------------------------
 verify() {
 	local bad=0
-	if [ -f "$SLS_DIR/SLSsteam.so" ]; then
-		file -b "$SLS_DIR/SLSsteam.so" | grep -q 'ELF 64-bit.*x86-64' && \
-			ok "SLSsteam.so is x86-64" || { warn "SLSsteam.so has the wrong architecture"; bad=1; }
-	fi
-	if [ -f "$LUMEN_DIR/lumen" ]; then
-		file -b "$LUMEN_DIR/lumen" | grep -q 'ELF 64-bit.*aarch64' && \
-			ok "lumen is aarch64" || { warn "lumen has the wrong architecture"; bad=1; }
-	fi
-	[ -f "$LUMEN_DIR/luatools/plugin.json" ] && ok "LuaTools plugin present" || { warn "LuaTools plugin missing"; bad=1; }
-	grep -q 'SLSSTEAM-FEX-MATCH' "$LUMEN_DIR/lua/proc.lua" 2>/dev/null && \
-		ok "Lumen recognises the FEX Steam process" || { warn "Lumen's FEX process match is missing"; bad=1; }
-	grep -q 'SLSSTEAM-AARCH64-UPDATE-URL' "$LUMEN_DIR/lua/about.lua" 2>/dev/null && \
-		ok "Lumen Update All points at this repository" || { warn "Lumen Update All still points upstream"; bad=1; }
-	[ -x "$LUMEN_DIR/luatools/backend/bin/7zz" ] && \
-		ok "aarch64 7zz present for the plugin backend" || warn "no 7zz binary in the plugin backend"
-	if [ -f "$SHARE/CloudRedirect/cloud_redirect.so" ]; then
-		file -b "$SHARE/CloudRedirect/cloud_redirect.so" | grep -q 'ELF 64-bit.*x86-64' && \
-			ok "CloudRedirect is x86-64" || { warn "CloudRedirect has the wrong architecture"; bad=1; }
+	if [ "$(elf_arch "$SLS_DIR/SLSsteam.so")" = "aarch64" ]; then
+		ok "SLSsteam.so is aarch64"
 	else
-		warn "CloudRedirect absent (cloud saves disabled)"
+		warn "SLSsteam.so has the wrong architecture"; bad=1
 	fi
-	grep -qF "$MARK_BEGIN" "$DROIDDECK_X64" && ok "x86-64 launcher patched" || { warn "x86-64 launcher not patched"; bad=1; }
-	[ -s "$SLS_DIR/SLSsteam.so" ] || { warn "SLSsteam.so missing"; bad=1; }
+	if [ "$(elf_arch "$LUMEN_DIR/lumen")" = "aarch64" ]; then
+		ok "lumen is aarch64"
+	else
+		warn "lumen has the wrong architecture"; bad=1
+	fi
+	[ -f "$PLUGIN_DIR/plugin.json" ] && ok "LuaTools plugin present" || { warn "LuaTools plugin missing"; bad=1; }
+	grep -qF "SLSsteam launcher wrapper" "$STEAM_BIN" 2>/dev/null && \
+		ok "Steam launcher is the SLSsteam wrapper" || { warn "Steam launcher is not wrapped"; bad=1; }
+	[ "$(elf_arch "$STEAM_REAL")" = "aarch64" ] && \
+		ok "steam.real is the native client" || { warn "steam.real missing or wrong arch"; bad=1; }
+	grep -qF 'LD_AUDIT="$SLS_SO' "$STEAM_BIN" 2>/dev/null && \
+		ok "wrapper injects SLSsteam through LD_AUDIT" || { warn "wrapper does not set LD_AUDIT"; bad=1; }
+	grep -qF -- '-noverifyfiles' "$STEAM_BIN" 2>/dev/null && \
+		ok "wrapper passes -noverifyfiles" || { warn "wrapper omits -noverifyfiles"; bad=1; }
+	grep -qF "$MARK_BEGIN" "$STEAM_INSTALL" 2>/dev/null && \
+		ok "droiddeck-steam-install re-applies the wrapper" || \
+		warn "update hook absent; re-run this installer after a Steam client update"
+	[ -x "$SLS_DIR/path/steam" ] && ok "Lumen Restart Steam shim present" || { warn "restart shim missing"; bad=1; }
 	return "$bad"
 }
 
@@ -695,11 +753,27 @@ verify() {
 # uninstall
 # ----------------------------------------------------------------------------
 do_uninstall() {
-	step "removing the installer's patch"
-	unpatch_droiddeck
-	step "removing SLSsteam, Lumen and CloudRedirect from $SHARE"
-	rm -rf "$SLS_DIR" "$LUMEN_DIR" "$SHARE/CloudRedirect"
-	rm -f "$X64_HOME/.config/SLSsteam/config.yaml" 2>/dev/null || true
+	step "restoring the Steam launcher"
+	uninstall_steam_install_hook
+	if grep -qF "SLSsteam launcher wrapper" "$STEAM_BIN" 2>/dev/null && [ -f "$STEAM_REAL" ]; then
+		mv -f "$STEAM_REAL" "$STEAM_BIN" && ok "steam.real restored as steam"
+	elif [ -f "$STEAM_REAL" ] && [ ! -f "$STEAM_BIN" ]; then
+		mv -f "$STEAM_REAL" "$STEAM_BIN" && ok "steam.real restored as steam"
+	fi
+
+	step "stopping Lumen"
+	pkill -f "$LUMEN_DIR/lumen" >/dev/null 2>&1 || true
+
+	# Keep the user's LuaTools settings outside the tree being removed.
+	local backup="$SHARE/luatools-data-backup"
+	if [ -d "$PLUGIN_DIR/backend/data" ]; then
+		mkdir -p "$backup"
+		cp -a "$PLUGIN_DIR/backend/data/." "$backup/" 2>/dev/null && \
+			ok "LuaTools settings backed up in $backup"
+	fi
+
+	step "removing SLSsteam and Lumen"
+	rm -rf "$SLS_DIR" "$LUMEN_DIR"
 	ok "uninstalled (the Steam client itself was not touched)"
 }
 
@@ -708,7 +782,7 @@ do_uninstall() {
 # ----------------------------------------------------------------------------
 main() {
 	parse_args "$@"
-	printf '%s\n' "luatools-aarch64 — LuaTools + SLSsteam + Lumen for DroidDeck"
+	printf '%s\n' "luatools-aarch64 — LuaTools + SLSsteam + Lumen for DroidDeck (native aarch64)"
 	if [ "$OPT_UNINSTALL" -eq 1 ]; then
 		do_uninstall
 		return 0
@@ -716,27 +790,30 @@ main() {
 
 	detect
 	ensure_deps
+	cleanup_x86_launcher
 	install_slsteam
 	install_lumen
 	install_plugin
-	install_cloudredirect
-	patch_droiddeck
+	migrate_legacy_data
+	install_launcher_wrapper
+	install_installer_copy
 
 	echo
 	if verify; then
-
 		cat <<EOF
 ${B}Instalação concluída.${N}
 
-  Inicie a Steam pelo ícone normal do DroidDeck (modo x86-64).
-  O launcher inicia o Lumen nativamente e injeta o SLSsteam no guest FEX.
+  Abra a Steam pelo ícone normal do DroidDeck (desktop ou modo jogo).
+  O wrapper injeta o SLSsteam no cliente aarch64 e inicia o Lumen.
 
   Verificação:
-    pgrep -af 'SLSsteam|Lumen/lumen'
-    grep -m1 SLSsteam /proc/\$(pgrep -f 'steamrt64/steam' | head -n1)/maps
+    pgrep -af '$LUMEN_DIR/lumen'
+    pid=\$(pgrep -x steam.real | head -n1)
+    grep -m1 SLSsteam /proc/\$pid/maps
+    tail -n 20 \$HOME/.SLSsteam.log
 
-  Log do Lumen: $X64_HOME/.lumen.log
-  Desativar a injeção numa sessão: SLS_DISABLE=1 steam
+  Log do Lumen: $LUMEN_DIR/lumen.log
+  Desativar a injeção numa sessão: SLS_DISABLE=1 (veja o wrapper)
 EOF
 	else
 		warn "a instalação terminou com pendências; veja os avisos acima"

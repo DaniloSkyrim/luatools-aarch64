@@ -1,0 +1,174 @@
+diff --git a/lua/about.lua b/lua/about.lua
+--- a/lua/about.lua
++++ b/lua/about.lua
+@@ -45,8 +45,9 @@
+ 
+ -- The public one-liner the Update All button runs in a terminal. Raw-branch URL
+ -- (not a release asset) so installer fixes go live without a rebuild.
++-- LUA_TOOLS-AARCH64-INSTALLER: run the local copy of this installer.
+ about.INSTALL_URL =
+-  "https://raw.githubusercontent.com/swwayps/luatools-moon/main/install.sh"
++  "file://" .. (os.getenv("HOME") or "") .. "/.local/share/Lumen/install.sh"
+ 
+ -- Where the installer stamps the installed release tags.
+ function about.versions_path()
+diff --git a/lua/loop.lua b/lua/loop.lua
+--- a/lua/loop.lua
++++ b/lua/loop.lua
+@@ -67,7 +67,8 @@
+         log("autostart entry changed/vanilla -> re-asserting desktop coverage")
+         deskcover.run("--user")
+       end
+-      local steam_alive = proc.is_alive("steam")
++      -- aarch64 Steam runs as `steam.real` behind the SLSsteam launcher wrapper.
++      local steam_alive = proc.is_alive("steam") or proc.is_alive("steam.real")
+       local should_exit, steam_returned =
+         watcher:should_exit(now, steam_alive)
+       if steam_returned then
+diff --git a/lua/restart_steam.sh b/lua/restart_steam.sh
+--- a/lua/restart_steam.sh
++++ b/lua/restart_steam.sh
+@@ -61,6 +61,19 @@
+ # Desktop sessions require the slsteam-moon wrapper. Never close Steam when the
+ # only relaunch option would omit SLSsteam/Lumen injection.
+ LAUNCHER="$HOME/.local/share/SLSsteam/path/steam"
++# The Steam Runtime launcher is already the SLSsteam wrapper, so the distro
++# launcher starts SLSsteam and Lumen when the slsteam-moon path is absent.
++if [ ! -x "$LAUNCHER" ] && [ -x /usr/bin/steam ]; then
++  for rt_launcher in \
++    "$HOME/.local/share/Steam/steamrtarm64/steam" \
++    "$HOME/.steam/steam/steamrtarm64/steam"; do
++    if [ -f "$rt_launcher" ] \
++        && head -c 200 "$rt_launcher" 2>/dev/null | grep -q 'SLSsteam launcher wrapper'; then
++      LAUNCHER=/usr/bin/steam
++      break
++    fi
++  done
++fi
+ if [ ! -x "$LAUNCHER" ]; then
+   if [ -n "${SLS_RESTART_DRYRUN:-}" ]; then echo "desktop:none"; fi
+   exit 1
+@@ -101,9 +114,9 @@
+ fi
+ 
+ restart_outcome="already-gone"
+-if pgrep -x steam >/dev/null 2>&1; then
++if pgrep -x '(steam|steam\.real)' >/dev/null 2>&1; then
+   restart_outcome="escalated"
+-  pkill -TERM -x steam >/dev/null 2>&1 || true
++  pkill -TERM -x '(steam|steam\.real)' >/dev/null 2>&1 || true
+ 
+   grace="${SLS_RESTART_GRACE_SECS:-15}"
+   case "$grace" in
+@@ -121,7 +134,7 @@
+           | grep -q 'Shutdown'; then
+         restart_outcome="clean"
+       fi
+-      if ! pgrep -x steam >/dev/null 2>&1; then
++      if ! pgrep -x '(steam|steam\.real)' >/dev/null 2>&1; then
+         [ "$restart_outcome" = "escalated" ] && restart_outcome="already-gone"
+         break
+       fi
+@@ -129,8 +142,8 @@
+     done
+   fi
+ 
+-  if pgrep -x steam >/dev/null 2>&1; then
+-    pkill -KILL -x steam >/dev/null 2>&1 || true
++  if pgrep -x '(steam|steam\.real)' >/dev/null 2>&1; then
++    pkill -KILL -x '(steam|steam\.real)' >/dev/null 2>&1 || true
+     restart_outcome="escalated"
+   fi
+ fi
+@@ -143,7 +156,7 @@
+ # This polling exists only inside an explicit restart; it is not part of
+ # Lumen's steady-state loop.
+ for _ in $(seq 1 75); do
+-  if ! pgrep -x steam >/dev/null 2>&1 \
++  if ! pgrep -x '(steam|steam\.real)' >/dev/null 2>&1 \
+       && ! pgrep -f 'steamwebhelper' >/dev/null 2>&1 \
+       && ! pgrep -f '/steam.sh([[:space:]]|$)' >/dev/null 2>&1 \
+       && ! pgrep -f 'srt-logger' >/dev/null 2>&1; then
+@@ -152,7 +165,7 @@
+   sleep 0.2
+ done
+ 
+-if pgrep -x steam >/dev/null 2>&1 \
++if pgrep -x '(steam|steam\.real)' >/dev/null 2>&1 \
+     || pgrep -f 'steamwebhelper' >/dev/null 2>&1 \
+     || pgrep -f '/steam.sh([[:space:]]|$)' >/dev/null 2>&1 \
+     || pgrep -f 'srt-logger' >/dev/null 2>&1; then
+diff --git a/lua/slscheck.lua b/lua/slscheck.lua
+--- a/lua/slscheck.lua
++++ b/lua/slscheck.lua
+@@ -24,13 +24,17 @@
+ -- its address space. slsteam-moon loads via LD_AUDIT at preinit, so by the time
+ -- the moon button anchors it is definitely mapped if the session is injected.
+ slscheck.STEAM_COMM = "steam"
++-- aarch64 Steam is exec'd as `steam.real` by the SLSsteam launcher wrapper.
++slscheck.STEAM_COMMS = { "steam", "steam.real" }
+ slscheck.LIB_NEEDLE = "SLSsteam.so"
+ 
+ -- The auto-fix script, served from the slsteam-moon repo's raw branch URL (like
+ -- install.sh) so fixes go live without cutting a new release. The main line is
+ -- the branch literally named `slsteam-moon`.
++-- The aarch64 stack repairs itself with the installer copy it leaves in the Lumen
++-- directory; the upstream script would install the 32-bit x86 slsteam-moon.
+ slscheck.AUTOFIX_URL =
+-  "https://raw.githubusercontent.com/swwayps/slsteam-moon/slsteam-moon/autofix.sh"
++  "file://" .. (os.getenv("HOME") or "") .. "/.local/share/Lumen/install.sh"
+ 
+ -- Single-quote a token for safe POSIX-shell interpolation.
+ local function shq(s)
+@@ -42,7 +46,12 @@
+ function slscheck.is_loaded(opts)
+   opts = opts or {}
+   local mapped = opts.mapped
+-    or function() return proc.lib_mapped(slscheck.STEAM_COMM, slscheck.LIB_NEEDLE) end
++    or function()
++      for _, comm in ipairs(slscheck.STEAM_COMMS) do
++        if proc.lib_mapped(comm, slscheck.LIB_NEEDLE) then return true end
++      end
++      return false
++    end
+   return mapped() and true or false
+ end
+ 
+diff --git a/lua/slsconfig.lua b/lua/slsconfig.lua
+--- a/lua/slsconfig.lua
++++ b/lua/slsconfig.lua
+@@ -26,14 +26,18 @@
+ -- longer disables it; the Steam wrapper crash-loop fail-safe covers that now),
+ -- so exposing a switch that does nothing would only confuse.
+ slsconfig.SCHEMA = {
++  -- Hidden: the native SLSsteam does not read these keys (toggles would do nothing).
+   { key = "PlayNotOwnedGames",      type = "bool",   default = false, level = "info",
++    hidden = true,
+     label = "Play not-owned games" },
+   { key = "DisableFamilyShareLock", type = "bool",   default = true,  level = "normal",
+     label = "Disable Family Share lock" },
+   { key = "DisableParentalRestrictions", type = "bool", default = false, level = "normal",
+     restart_on_change = true,
++    hidden = true,
+     label = "Disable parental restrictions" },
+   { key = "AutoFilterList",         type = "bool",   default = true,  level = "advanced",
++    hidden = true,
+     label = "Auto-filter app list" },
+   { key = "UseWhitelist",           type = "bool",   default = false, level = "danger",
+     label = "Use whitelist (instead of blacklist)" },
+@@ -41,6 +45,7 @@
+     hidden = true,
+     label = "Safe mode (disable on unknown steamclient)" },
+   { key = "Notifications",          type = "bool",   default = true,  level = "normal",
++    hidden = true,
+     label = "Notifications (notify-send)" },
+   { key = "NotifyInit",             type = "bool",   default = true,  level = "normal",
+     label = "Notify on init" },
+@@ -61,6 +66,7 @@
+     min = 0, max = 2147483647,
+     label = "Fake wallet balance (0 = off)" },
+   { key = "LogLevel",               type = "enum",   default = 2,     level = "advanced",
++    hidden = true,
+     label = "Log level",
+     options = { 0, 1, 2, 3, 4, 5, 6 },
+     option_labels = { "Once (0)", "Debug (1)", "Info (2)", "NotifyShort (3)",

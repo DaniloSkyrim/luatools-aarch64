@@ -5,3 +5,6 @@ dist/
 *.tar.gz
 __pycache__/
 *.pyc
+
+.shots/
+CLAUDE.md
