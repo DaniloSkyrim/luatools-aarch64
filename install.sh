@@ -734,6 +734,8 @@ refresh_staged_manifest() {
 	# tests mount the same layout elsewhere; anything else outside the prefix
 	# has no manifest entry to refresh.
 	local key prefix="${DROIDDECK_STAGED_PREFIX:-/}"
+	# Normalize: "" or "/" both mean "keys are full in-guest paths".
+	[ "$prefix" = "/" ] && prefix=""
 	case $f in
 		"$prefix"/*) key="${f#"$prefix"/}" ;;
 		*) return 0 ;;
@@ -744,9 +746,16 @@ refresh_staged_manifest() {
 	# The app stamps the manifest with millisecond mtimes; mirror that format.
 	ms=$(stat -c '%Y' "$f")000
 	tmp="$STAGED_MANIFEST.luatools-new"
+	# Field 2 (tab-separated) is "size mtime flag" — the flag must survive, or
+	# the app treats the entry as malformed and re-extracts the file. Field 3
+	# stays whatever it was (the real manifest leaves it empty).
 	awk -v key="$key" -v size="$size" -v ms="$ms" '
 		BEGIN { FS = "\t"; OFS = "\t" }
-		$1 == key { print $1, size " " ms, $3; done = 1; next }
+		$1 == key {
+			n = split($2, p, " ")
+			$2 = size " " ms (n >= 3 ? " " p[3] : "")
+			done = 1
+		}
 		{ print }
 		END { exit done ? 0 : 1 }
 	' "$STAGED_MANIFEST" > "$tmp" || { rm -f "$tmp"; return 0; }
